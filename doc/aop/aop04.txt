@@ -1,0 +1,319 @@
+Spring AOP注解解析
+-------------------------aop调用流程-------------------------
+正常执行：前置通知-》目标方法-》后置通知-》返回通知
+出现异常：前置通知-》目标方法-》后置通知-》异常通知
+final class JdkDynamicAopProxy implements AopProxy, InvocationHandler, Serializable {
+    @Override
+	public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+		MethodInvocation invocation;
+		Object oldProxy = null;
+		boolean setProxyContext = false;
+        // 获取被代理对象引用
+		TargetSource targetSource = this.advised.targetSource;
+		Class<?> targetClass = null;
+		Object target = null;
+		try {
+		    // 执行equals方法
+			if (!this.equalsDefined && AopUtils.isEqualsMethod(method)) {
+				// 目标本身并不实现equals(Object)方法
+				return equals(args[0]);
+			}
+			// 执行hashCode方法
+			else if (!this.hashCodeDefined && AopUtils.isHashCodeMethod(method)) {
+				// 目标本身并不实现hashCode()方法
+				return hashCode();
+			}
+			// DecoratingProxy接口用于获取当前代理对象所代理的目标对象的Class类型
+			else if (method.getDeclaringClass() == DecoratingProxy.class) {
+				// 只有getDecoratedClass()声明->分派到代理配置
+				return AopProxyUtils.ultimateTargetClass(this.advised);
+			}
+			// 不可强转 && 接口 && 属于Advised类型
+			else if (!this.advised.opaque && method.getDeclaringClass().isInterface() &&
+					method.getDeclaringClass().isAssignableFrom(Advised.class)) {
+				// 代理配置对ProxyConfig的服务调用
+				return AopUtils.invokeJoinpointUsingReflection(this.advised, method, args);
+			}
+			Object retVal;
+            // 代理对象需要被曝光
+			if (this.advised.exposeProxy) {
+				oldProxy = AopContext.setCurrentProxy(proxy);
+				setProxyContext = true;
+			}
+			// 获取被代理对象实例
+			target = targetSource.getTarget();
+			if (target != null) {
+				targetClass = target.getClass();
+			}
+			// 获取此方法的拦截链
+			List<Object> chain = this.advised.getInterceptorsAndDynamicInterceptionAdvice(method, targetClass);
+			if (chain.isEmpty()) {
+				Object[] argsToUse = AopProxyUtils.adaptArgumentsIfNecessary(method, args);
+				// 拦截链为空时，则直接利用反射执行目标方法
+				retVal = AopUtils.invokeJoinpointUsingReflection(target, method, argsToUse);
+			}
+			else {
+				// 创建一个用于方法调用的ReflectiveMethodInvocation对象，并将拦截器链传入进去
+				invocation = new ReflectiveMethodInvocation(proxy, target, method, args, targetClass, chain);
+				// 执行拦截器链
+				retVal = invocation.proceed();
+			}
+
+			// 获取方法的返回值类型
+			Class<?> returnType = method.getReturnType();
+			// 当返回自身的引用时：return this;
+			if (retVal != null && retVal == target &&
+					returnType != Object.class && returnType.isInstance(proxy) &&
+					!RawTargetAccess.class.isAssignableFrom(method.getDeclaringClass())) {
+				retVal = proxy;
+			}
+			// 返回值为null && 返回值类型不是Void && 返回值类型是基础数据类型(int,long...)
+			else if (retVal == null && returnType != Void.TYPE && returnType.isPrimitive()) {
+			    // 抛出类型不匹配的异常
+				throw new AopInvocationException(
+						"Null return value from advice does not match primitive return type for: " + method);
+			}
+			return retVal;
+		}
+		finally {
+			if (target != null && !targetSource.isStatic()) {
+				// Must have come from TargetSource.
+				targetSource.releaseTarget(target);
+			}
+			if (setProxyContext) {
+				// Restore old proxy.
+				AopContext.setCurrentProxy(oldProxy);
+			}
+		}
+	}
+}
+public class AdvisedSupport extends ProxyConfig implements Advised {
+	public List<Object> getInterceptorsAndDynamicInterceptionAdvice(Method method, Class<?> targetClass) {
+		MethodCacheKey cacheKey = new MethodCacheKey(method);
+		// 从缓存中获取拦截器链
+		List<Object> cached = this.methodCache.get(cacheKey);
+		if (cached == null) {
+		    // 缓存不存在，调用getInterceptorsAndDynamicInterceptionAdvice()获取，并存入缓存
+			cached = this.advisorChainFactory.getInterceptorsAndDynamicInterceptionAdvice(
+					this, method, targetClass);
+			this.methodCache.put(cacheKey, cached);
+		}
+		return cached;
+	}
+}
+public class DefaultAdvisorChainFactory implements AdvisorChainFactory, Serializable {
+
+	@Override
+	public List<Object> getInterceptorsAndDynamicInterceptionAdvice(
+			Advised config, Method method, Class<?> targetClass) {
+		List<Object> interceptorList = new ArrayList<Object>(config.getAdvisors().length);
+		Class<?> actualClass = (targetClass != null ? targetClass : method.getDeclaringClass());
+		boolean hasIntroductions = hasMatchingIntroductions(config, actualClass);
+		// 获取适配器DefaultAdvisorAdapterRegistry实例
+		AdvisorAdapterRegistry registry = GlobalAdvisorAdapterRegistry.getInstance();
+        // 获取所有的Advisor进行遍历
+		for (Advisor advisor : config.getAdvisors()) {
+			if (advisor instanceof PointcutAdvisor) {
+				PointcutAdvisor pointcutAdvisor = (PointcutAdvisor) advisor;
+				// 已经被预先过滤 || 当前Class类型过滤匹配成功
+				if (config.isPreFiltered() || pointcutAdvisor.getPointcut().getClassFilter().matches(actualClass)) {
+				    // 获取拦截器链
+					MethodInterceptor[] interceptors = registry.getInterceptors(advisor);
+					// 方法匹配器：检查目标方法是否符合通知条件
+					MethodMatcher mm = pointcutAdvisor.getPointcut().getMethodMatcher();
+					if (MethodMatchers.matches(mm, method, actualClass, hasIntroductions)) {
+					    // MethodMatcher中的切点分静态和动态
+					    // 静态：缓存第一次匹配的结果，isRuntime()返回false
+					    // 动态：每次方法调用都会进行匹配，isRuntime()返回true
+						if (mm.isRuntime()) {
+							for (MethodInterceptor interceptor : interceptors) {
+								interceptorList.add(new InterceptorAndDynamicMethodMatcher(interceptor, mm));
+							}
+						}
+						else {
+							interceptorList.addAll(Arrays.asList(interceptors));
+						}
+					}
+				}
+			}
+			else if (advisor instanceof IntroductionAdvisor) {
+				IntroductionAdvisor ia = (IntroductionAdvisor) advisor;
+				if (config.isPreFiltered() || ia.getClassFilter().matches(actualClass)) {
+					Interceptor[] interceptors = registry.getInterceptors(advisor);
+					interceptorList.addAll(Arrays.asList(interceptors));
+				}
+			}
+			else {
+				Interceptor[] interceptors = registry.getInterceptors(advisor);
+				interceptorList.addAll(Arrays.asList(interceptors));
+			}
+		}
+		return interceptorList;
+	}
+}
+public class DefaultAdvisorAdapterRegistry implements AdvisorAdapterRegistry, Serializable {
+
+	private final List<AdvisorAdapter> adapters = new ArrayList<AdvisorAdapter>(3);
+    // 注册三个通知适配器：前置通知，后置返回通知，后置异常通知
+	public DefaultAdvisorAdapterRegistry() {
+		registerAdvisorAdapter(new MethodBeforeAdviceAdapter());
+		registerAdvisorAdapter(new AfterReturningAdviceAdapter());
+		registerAdvisorAdapter(new ThrowsAdviceAdapter());
+	}
+    @Override
+    public MethodInterceptor[] getInterceptors(Advisor advisor) throws UnknownAdviceTypeException {
+        List<MethodInterceptor> interceptors = new ArrayList<MethodInterceptor>(3);
+        Advice advice = advisor.getAdvice();
+        // 如果是MethodInterceptor类型，直接加入到列表中（after后置通知，afterThrowing后置异常通知，around环绕通知）
+        // AspectJAfterAdvice，AspectJAfterThrowingAdvice，AspectJAroundAdvice
+        if (advice instanceof MethodInterceptor) {
+            interceptors.add((MethodInterceptor) advice);
+        }
+        for (AdvisorAdapter adapter : this.adapters) {
+            // 判断初始化配置的三个通知适配器是否支持当前通知（前置通知，后置返回通知）
+            if (adapter.supportsAdvice(advice)) {
+                // 生成相应的拦截器（MethodBeforeAdviceInterceptor/AfterReturningAdviceInterceptor/ThrowsAdviceInterceptor）
+                interceptors.add(adapter.getInterceptor(advisor));
+            }
+        }
+        if (interceptors.isEmpty()) {
+            throw new UnknownAdviceTypeException(advisor.getAdvice());
+        }
+        return interceptors.toArray(new MethodInterceptor[interceptors.size()]);
+    }
+}
+public class ReflectiveMethodInvocation implements ProxyMethodInvocation, Cloneable {
+	public Object proceed() throws Throwable {
+		//	拦截器链的执行，从-1索引开始，当执行完所有拦截器时，则直接使用反射调用目标方法
+		if (this.currentInterceptorIndex == this.interceptorsAndDynamicMethodMatchers.size() - 1) {
+			return invokeJoinpoint();
+		}
+        // 先对索引递增，获取当前拦截器
+		Object interceptorOrInterceptionAdvice =
+				this.interceptorsAndDynamicMethodMatchers.get(++this.currentInterceptorIndex);
+		// 如果拦截器是InterceptorAndDynamicMethodMatcher类型（动态方法匹配拦截器）
+		if (interceptorOrInterceptionAdvice instanceof InterceptorAndDynamicMethodMatcher) {
+			InterceptorAndDynamicMethodMatcher dm =
+					(InterceptorAndDynamicMethodMatcher) interceptorOrInterceptionAdvice;
+			// 动态匹配目标方法
+			if (dm.methodMatcher.matches(this.method, this.targetClass, this.arguments)) {
+				return dm.interceptor.invoke(this);
+			}
+			else {
+				// 动态匹配失败，跳过当前拦截器，调用链中的下一个
+				return proceed();
+			}
+		}
+		else {
+			// 开始调用拦截器逻辑，并传递ReflectiveMethodInvocation对象
+			return ((MethodInterceptor) interceptorOrInterceptionAdvice).invoke(this);
+		}
+	}
+}
+public class ExposeInvocationInterceptor implements MethodInterceptor, PriorityOrdered, Serializable {
+    // 初始化线程本地变量，用于保存当前AOP方法调用
+    private static final ThreadLocal<MethodInvocation> invocation =
+			new NamedThreadLocal<MethodInvocation>("Current AOP method invocation");
+	@Override
+	public Object invoke(MethodInvocation mi) throws Throwable {
+		MethodInvocation oldInvocation = invocation.get();
+		// 将MethodInvocation实例设置到ThreadLocal中
+		invocation.set(mi);
+		try {
+		    // 调用下一个拦截器
+			return mi.proceed();
+		}
+		finally {
+			invocation.set(oldInvocation);
+		}
+	}
+}
+public class MethodBeforeAdviceInterceptor implements MethodInterceptor, Serializable {
+    // 前置通知advice对象
+	private MethodBeforeAdvice advice;
+
+	public MethodBeforeAdviceInterceptor(MethodBeforeAdvice advice) {
+		Assert.notNull(advice, "Advice must not be null");
+		this.advice = advice;
+	}
+	@Override
+	public Object invoke(MethodInvocation mi) throws Throwable {
+	    // 执行前置通知逻辑
+		this.advice.before(mi.getMethod(), mi.getArguments(), mi.getThis() );
+		// 调用下一个拦截器，当执行完所有拦截器时，则直接使用反射调用目标方法
+		return mi.proceed();
+	}
+
+}
+public abstract class AbstractAspectJAdvice implements Advice, AspectJPrecedenceInformation, Serializable {
+	protected Object invokeAdviceMethod(JoinPointMatch jpMatch, Object returnValue, Throwable ex) throws Throwable {
+		return invokeAdviceMethodWithGivenArgs(argBinding(getJoinPoint(), jpMatch, returnValue, ex));
+	}
+    protected Object[] argBinding(JoinPoint jp, JoinPointMatch jpMatch, Object returnValue, Throwable ex) {
+		calculateArgumentBindings();
+		Object[] adviceInvocationArgs = new Object[this.parameterTypes.length];
+		int numBound = 0;
+        // JoinPoint和ProceedingJoinPoint参数的索引判断
+		if (this.joinPointArgumentIndex != -1) {
+			adviceInvocationArgs[this.joinPointArgumentIndex] = jp;
+			numBound++;
+		}
+		else if (this.joinPointStaticPartArgumentIndex != -1) {
+			adviceInvocationArgs[this.joinPointStaticPartArgumentIndex] = jp.getStaticPart();
+			numBound++;
+		}
+		if (!CollectionUtils.isEmpty(this.argumentBindings)) {
+			// binding from pointcut match
+			if (jpMatch != null) {
+				PointcutParameter[] parameterBindings = jpMatch.getParameterBindings();
+				for (PointcutParameter parameter : parameterBindings) {
+					String name = parameter.getName();
+					Integer index = this.argumentBindings.get(name);
+					adviceInvocationArgs[index] = parameter.getBinding();
+					numBound++;
+				}
+			}
+			// 绑定@AfterReturing中的returning参数
+			if (this.returningName != null) {
+				Integer index = this.argumentBindings.get(this.returningName);
+				adviceInvocationArgs[index] = returnValue;
+				numBound++;
+			}
+			// 绑定@AfterThrowing中的throwing参数
+			if (this.throwingName != null) {
+				Integer index = this.argumentBindings.get(this.throwingName);
+				adviceInvocationArgs[index] = ex;
+				numBound++;
+			}
+		}
+        // 如果传参个数与方法接收参数列表长度不匹配，则抛异常
+		if (numBound != this.parameterTypes.length) {
+			throw new IllegalStateException("Required to bind " + this.parameterTypes.length +
+					" arguments, but only bound " + numBound + " (JoinPointMatch " +
+					(jpMatch == null ? "was NOT" : "WAS") + " bound in invocation)");
+		}
+        // 返回参数列表
+		return adviceInvocationArgs;
+	}
+    protected Object invokeAdviceMethodWithGivenArgs(Object[] args) throws Throwable {
+		Object[] actualArgs = args;
+		// 判断是否有参数
+		if (this.aspectJAdviceMethod.getParameterTypes().length == 0) {
+			actualArgs = null;
+		}
+		try {
+			ReflectionUtils.makeAccessible(this.aspectJAdviceMethod);
+			// 通过反射执行目标方法
+			return this.aspectJAdviceMethod.invoke(this.aspectInstanceFactory.getAspectInstance(), actualArgs);
+		}
+		catch (IllegalArgumentException ex) {
+			throw new AopInvocationException("Mismatch on arguments to advice method [" +
+					this.aspectJAdviceMethod + "]; pointcut expression [" +
+					this.pointcut.getPointcutExpression() + "]", ex);
+		}
+		catch (InvocationTargetException ex) {
+			throw ex.getTargetException();
+		}
+	}
+}
+

@@ -1,0 +1,316 @@
+Spring容器初始化--创建BeanFactory及加载Bean定义信息(一)
+public class ClassPathXmlApplicationContext extends AbstractXmlApplicationContext {
+    public ClassPathXmlApplicationContext(String configLocation) throws BeansException {
+        this(new String[]{configLocation}, true, (ApplicationContext)null);
+    }
+    public ClassPathXmlApplicationContext(String[] configLocations, boolean refresh, ApplicationContext parent) throws BeansException {
+        // 调用父类构造方法，容器初始化
+        super(parent);
+        // 解析指定加载配置文件的位置，然后赋值给父类AbstractRefreshableConfigApplicationContext的configLocations属性
+        this.setConfigLocations(configLocations);
+        if (refresh) {
+            // 核心方法，刷新容器
+            this.refresh();
+        }
+    }
+}
+public abstract class AbstractApplicationContext extends DefaultResourceLoader
+		implements ConfigurableApplicationContext, DisposableBean {
+    public void refresh() throws BeansException, IllegalStateException {
+        synchronized(this.startupShutdownMonitor) {
+            // 容器准备刷新的方法，设置启动时间及容器状态标识等
+            this.prepareRefresh();
+            // 读取配置文件，解析Bean定义信息，注册到BeanFactory中。仅仅是注册，bean还没有进行初始化
+            ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+            // 设置BeanFactory的类加载器，添加几个BeanPostProcessor，手动注册几个特殊的bean
+            prepareBeanFactory(beanFactory);
+            try {
+                // 这里是提供给子类的扩展点，到这里的时候，所有的Bean定义信息都加载、注册完成了，但是都还没有初始化
+                // 作用是在BeanFactory准备工作完成后做一些定制化的处理，修改bean的定义信息或注册BeanPostProcessor组件等
+                postProcessBeanFactory(beanFactory);
+                // 实例化BeanFactoryPostProcessor各个实现类，并调用其postProcessBeanFactory(factory)方法
+                invokeBeanFactoryPostProcessors(beanFactory);
+                // 注册 BeanPostProcessor 的实现类，注意看和 BeanFactoryPostProcessor 的区别
+                // 此接口两个方法: postProcessBeforeInitialization 和 postProcessAfterInitialization
+                // 两个方法分别在 Bean 初始化之前和初始化之后得到执行。注意，到这里 Bean 还没初始化
+                registerBeanPostProcessors(beanFactory);
+                // 初始化MessageSource组件（做国际化功能；消息绑定，消息解析）
+                initMessageSource();
+                // 初始化当前 ApplicationContext 的事件广播器，这里也不展开了
+                initApplicationEventMulticaster();
+                // 子类重写这个方法，在容器刷新的时候可以自定义逻辑
+                onRefresh();
+                // 注册事件监听器（实现了ApplicationListener接口）
+                registerListeners();
+                // 初始化剩下的所有单实例bean（lazy-init的除外）
+                finishBeanFactoryInitialization(beanFactory);
+                // 完成BeanFactory的初始化创建工作；IOC容器就创建完成，发布事件
+                finishRefresh();
+            }
+            catch (BeansException ex) {
+                if (logger.isWarnEnabled()) {
+                    logger.warn("Exception encountered during context initialization - " +
+                      "cancelling refresh attempt: " + ex);
+                }
+                // 销毁已经初始化的singleton的Beans，以免有些 bean 会一直占用资源
+                destroyBeans();
+                // Reset 'active' flag.
+                cancelRefresh(ex);
+                // 把异常往外抛
+                throw ex;
+            }
+            finally {
+                // Reset common introspection caches in Spring's core, since we
+                // might not ever need metadata for singleton beans anymore...
+                resetCommonCaches();
+            }
+        }
+    }
+    -----------------------------------容器刷新前的预处理-----------------------------------
+    protected void prepareRefresh() {
+        // 当前系统时间
+        this.startupDate = System.currentTimeMillis();
+        // 当前context是否已关闭
+        this.closed.set(false);
+        // 当前context是否活跃状态
+        this.active.set(true);
+        // 是否开启日志模式
+        if (this.logger.isInfoEnabled()) {
+            this.logger.info("Refreshing " + this);
+        }
+        // 初始化一些属性设置，子类自定义个性化的属性设置方法；
+        this.initPropertySources();
+        // 验证所有标记为必需的属性都是可解析的，如果有必填属性为空则抛异常
+        this.getEnvironment().validateRequiredProperties();
+        // 初始化早期事件容器，后面注册监听器时会使用
+        this.earlyApplicationEvents = new LinkedHashSet();
+    }
+    // 不做处理，由子类实现
+    protected void initPropertySources() {
+    }
+    // 获取当前容器的环境信息对象
+    public ConfigurableEnvironment getEnvironment() {
+        if (this.environment == null) {
+            this.environment = this.createEnvironment();
+        }
+        return this.environment;
+    }
+    // 初始化新的环境信息对象
+    protected ConfigurableEnvironment createEnvironment() {
+        return new StandardEnvironment();
+    }
+    -----------------------------------创建BeanFactory，加载Bean定义信息-----------------------------------
+    protected ConfigurableListableBeanFactory obtainFreshBeanFactory() {
+        // 刷新创建BeanFactory
+        refreshBeanFactory();
+        // 获取上一步初始化完成的BeanFactory返回
+        ConfigurableListableBeanFactory beanFactory = getBeanFactory();
+        if (logger.isDebugEnabled()) {
+            logger.debug("Bean factory for " + getDisplayName() + ": " + beanFactory);
+        }
+        return beanFactory;
+    }
+    // 抽象方法，由子类实现
+    protected abstract void refreshBeanFactory() throws BeansException, IllegalStateException;
+}
+public abstract class AbstractRefreshableApplicationContext extends AbstractApplicationContext {
+    @Override
+    protected final void refreshBeanFactory() throws BeansException {
+        // 判断是否存在BeanFactory对象，如果存在则销毁其中的bean信息，关闭BeanFactory
+        if (hasBeanFactory()) {
+            destroyBeans();
+            closeBeanFactory();
+        }
+        try {
+            // 创建BeanFactory
+            DefaultListableBeanFactory beanFactory = createBeanFactory();
+            // 设置序列化id
+            beanFactory.setSerializationId(getId());
+            // BeanFactory属性设置
+            customizeBeanFactory(beanFactory);
+            // 加载bean的定义信息，抽象方法，由子类实现
+            loadBeanDefinitions(beanFactory);
+            synchronized (this.beanFactoryMonitor) {
+                this.beanFactory = beanFactory;
+            }
+        }
+        catch (IOException ex) {
+            throw new ApplicationContextException("I/O error parsing bean definition source for " + getDisplayName(), ex);
+        }
+    }
+    // 创建BeanFactory
+    protected DefaultListableBeanFactory createBeanFactory() {
+        return new DefaultListableBeanFactory(getInternalParentBeanFactory());
+    }
+    protected void customizeBeanFactory(DefaultListableBeanFactory beanFactory) {
+        // 是否允许bean被覆盖
+        if (this.allowBeanDefinitionOverriding != null) {
+            beanFactory.setAllowBeanDefinitionOverriding(this.allowBeanDefinitionOverriding);
+        }
+        // 是否允许bean被循环引用
+        if (this.allowCircularReferences != null) {
+            beanFactory.setAllowCircularReferences(this.allowCircularReferences);
+        }
+    }
+}
+public abstract class AbstractXmlApplicationContext extends AbstractRefreshableConfigApplicationContext {
+    @Override
+	protected void loadBeanDefinitions(DefaultListableBeanFactory beanFactory) throws BeansException, IOException {
+		// 创建XmlBeanDefinitionReader对象， 用于读取bean的定义信息
+		XmlBeanDefinitionReader beanDefinitionReader = new XmlBeanDefinitionReader(beanFactory);
+		// Configure the bean definition reader with this context's
+		// 设置环境信息
+		beanDefinitionReader.setEnvironment(this.getEnvironment());
+		// 设置资源加载器
+		beanDefinitionReader.setResourceLoader(this);
+		// 设置xml文件解析器
+		beanDefinitionReader.setEntityResolver(new ResourceEntityResolver(this));
+		// 允许子类自定义初始化
+		initBeanDefinitionReader(beanDefinitionReader);
+		// 加载bean定义信息，往下走
+		loadBeanDefinitions(beanDefinitionReader);
+	}
+    protected void loadBeanDefinitions(XmlBeanDefinitionReader reader) throws BeansException, IOException {
+        // 获取下xml配置文件的位置
+        Resource[] configResources = getConfigResources();
+        if (configResources != null) {
+            // 加载bean定义信息，往下走
+            reader.loadBeanDefinitions(configResources);
+        }
+        String[] configLocations = getConfigLocations();
+        if (configLocations != null) {
+            reader.loadBeanDefinitions(configLocations);
+        }
+    }
+}
+public abstract class AbstractBeanDefinitionReader implements EnvironmentCapable, BeanDefinitionReader {
+	@Override
+	public int loadBeanDefinitions(String... locations) throws BeanDefinitionStoreException {
+		Assert.notNull(locations, "Location array must not be null");
+		int counter = 0;
+		for (String location : locations) {
+		    // 加载bean定义信息，往下走
+			counter += loadBeanDefinitions(location);
+		}
+		return counter;
+	}
+    @Override
+    public int loadBeanDefinitions(String location) throws BeanDefinitionStoreException {
+        return loadBeanDefinitions(location, null);
+    }
+    public int loadBeanDefinitions(String location, Set<Resource> actualResources) throws BeanDefinitionStoreException {
+        // 获取资源加载器
+		ResourceLoader resourceLoader = getResourceLoader();
+		if (resourceLoader == null) {
+			throw new BeanDefinitionStoreException(
+					"Cannot import bean definitions from location [" + location + "]: no ResourceLoader available");
+		}
+        // 策略接口，可以通过通配符加载资源文件列表
+		if (resourceLoader instanceof ResourcePatternResolver) {
+			// Resource pattern matching available.
+			try {
+			    // 获取资源配置文件信息
+				Resource[] resources = ((ResourcePatternResolver) resourceLoader).getResources(location);
+				// 加载bean定义信息，往下走
+				int loadCount = loadBeanDefinitions(resources);
+				if (actualResources != null) {
+					for (Resource resource : resources) {
+						actualResources.add(resource);
+					}
+				}
+				if (logger.isDebugEnabled()) {
+					logger.debug("Loaded " + loadCount + " bean definitions from location pattern [" + location + "]");
+				}
+				return loadCount;
+			}
+			catch (IOException ex) {
+				throw new BeanDefinitionStoreException(
+						"Could not resolve bean definition resource pattern [" + location + "]", ex);
+			}
+		}
+		else {
+			// 只能通过绝对URL加载单个资源
+			Resource resource = resourceLoader.getResource(location);
+			int loadCount = loadBeanDefinitions(resource);
+			if (actualResources != null) {
+				actualResources.add(resource);
+			}
+			if (logger.isDebugEnabled()) {
+				logger.debug("Loaded " + loadCount + " bean definitions from location [" + location + "]");
+			}
+			return loadCount;
+		}
+	}
+	@Override
+	public int loadBeanDefinitions(Resource... resources) throws BeanDefinitionStoreException {
+		Assert.notNull(resources, "Resource array must not be null");
+		int counter = 0;
+		for (Resource resource : resources) {
+		    // 加载bean定义信息，往下走
+			counter += loadBeanDefinitions(resource);
+		}
+		return counter;
+	}
+}
+public class XmlBeanDefinitionReader extends AbstractBeanDefinitionReader {
+	@Override
+	public int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException {
+		return loadBeanDefinitions(new EncodedResource(resource));
+	}
+    public int loadBeanDefinitions(EncodedResource encodedResource) throws BeanDefinitionStoreException {
+		Assert.notNull(encodedResource, "EncodedResource must not be null");
+		if (logger.isInfoEnabled()) {
+			logger.info("Loading XML bean definitions from " + encodedResource.getResource());
+		}
+        // 当前正在加载的XML bean定义资源
+		Set<EncodedResource> currentResources = this.resourcesCurrentlyBeingLoaded.get();
+		if (currentResources == null) {
+			currentResources = new HashSet<EncodedResource>(4);
+			this.resourcesCurrentlyBeingLoaded.set(currentResources);
+		}
+		if (!currentResources.add(encodedResource)) {
+			throw new BeanDefinitionStoreException(
+					"Detected cyclic loading of " + encodedResource + " - check your import definitions!");
+		}
+		try {
+		    // 将xml资源文件转为InputStream流对象
+			InputStream inputStream = encodedResource.getResource().getInputStream();
+			try {
+			    // SAX解析器将使用InputSource对象来确定如何读取XML输入
+				InputSource inputSource = new InputSource(inputStream);
+				if (encodedResource.getEncoding() != null) {
+					inputSource.setEncoding(encodedResource.getEncoding());
+				}
+				// 加载bean定义信息，往下走
+				return doLoadBeanDefinitions(inputSource, encodedResource.getResource());
+			}
+			finally {
+				inputStream.close();
+			}
+		}
+		...
+	}
+    protected int doLoadBeanDefinitions(InputSource inputSource, Resource resource)
+			throws BeanDefinitionStoreException {
+		try {
+		    // 将xml资源文件转为Document对象
+			Document doc = doLoadDocument(inputSource, resource);
+			// 解析并注册Bean定义信息
+			return registerBeanDefinitions(doc, resource);
+		}
+		...
+	}
+    public int registerBeanDefinitions(Document doc, Resource resource) throws BeanDefinitionStoreException {
+        // 创建Bean定义信息的解析器对象
+        BeanDefinitionDocumentReader documentReader = createBeanDefinitionDocumentReader();
+        // 获取当前容器中已解析bean的数量
+        int countBefore = getRegistry().getBeanDefinitionCount();
+        // 解析bean定义信息，往下走
+        documentReader.registerBeanDefinitions(doc, createReaderContext(resource));
+        // 返回当前解析bean定义信息的数量
+        return getRegistry().getBeanDefinitionCount() - countBefore;
+    }
+}
+以上是：
+    1：Spring容器刷新前的预处理
+    2：BeanFactory创建，加载指定xml资源文件Resource，并将其转换为Document对象

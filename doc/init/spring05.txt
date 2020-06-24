@@ -1,0 +1,314 @@
+Spring容器初始化--BeanPostProcessor/MessageSource/ApplicationEventMulticaster/Listener等组件的注册
+public abstract class AbstractApplicationContext extends DefaultResourceLoader
+		implements ConfigurableApplicationContext, DisposableBean {
+    public void refresh() throws BeansException, IllegalStateException {
+        ...
+        // 注册BeanPostProcessor的实现类，在bean的初始化前后进行拦截
+        // 实现两个方法: postProcessBeforeInitialization 和 postProcessAfterInitialization
+        registerBeanPostProcessors(beanFactory);
+        // 初始化MessageSource组件（做国际化功能；消息绑定，消息解析）
+        initMessageSource();
+        // 初始化ApplicationContext的事件广播器
+        initApplicationEventMulticaster();
+        // 子类重写这个方法，在容器刷新的时候可以自定义逻辑
+        onRefresh();
+        // 注册事件监听器（实现了ApplicationListener接口）
+        registerListeners();
+        // 初始化剩下的所有单实例bean（lazy-init的除外）
+        finishBeanFactoryInitialization(beanFactory);
+        // 完成BeanFactory的初始化创建工作；IOC容器就创建完成，发布事件
+        finishRefresh();
+        ...
+    }
+    // 注册BeanPostProcessor的实现类
+	protected void registerBeanPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+		PostProcessorRegistrationDelegate.registerBeanPostProcessors(beanFactory, this);
+	}
+}
+class PostProcessorRegistrationDelegate {
+    public static void registerBeanPostProcessors(
+			ConfigurableListableBeanFactory beanFactory, AbstractApplicationContext applicationContext) {
+        // 从beanFactory获取所有BeanPostProcessor接口的实现类名称
+		String[] postProcessorNames = beanFactory.getBeanNamesForType(BeanPostProcessor.class, true, false);
+
+		// BeanPostProcessor实现类数量
+		int beanProcessorTargetCount = beanFactory.getBeanPostProcessorCount() + 1 + postProcessorNames.length;
+		// 注册BeanPostProcessorChecker，用于记录BeanPostProcessor实现类的实例化信息
+		beanFactory.addBeanPostProcessor(new BeanPostProcessorChecker(beanFactory, beanProcessorTargetCount));
+		// 用于保存实现了PriorityOrdered接口的BeanPostProcessor
+		List<BeanPostProcessor> priorityOrderedPostProcessors = new ArrayList<BeanPostProcessor>();
+		// 用于保存实现了MergedBeanDefinitionPostProcessor接口的BeanPostProcessor
+		List<BeanPostProcessor> internalPostProcessors = new ArrayList<BeanPostProcessor>();
+		// 用于保存实现了Ordered接口的BeanPostProcessor
+		List<String> orderedPostProcessorNames = new ArrayList<String>();
+		// 用于保存普通（未实现PriorityOrdered及Ordered接口）的BeanPostProcessor
+		List<String> nonOrderedPostProcessorNames = new ArrayList<String>();
+		for (String ppName : postProcessorNames) {
+		    // 实现了PriorityOrdered接口的BeanPostProcessor
+			if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+			    // 获取bean实例
+				BeanPostProcessor pp = beanFactory.getBean(ppName, BeanPostProcessor.class);
+				priorityOrderedPostProcessors.add(pp);
+				if (pp instanceof MergedBeanDefinitionPostProcessor) {
+					internalPostProcessors.add(pp);
+				}
+			}
+			// 实现了Ordered接口的BeanPostProcessor
+			else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+				orderedPostProcessorNames.add(ppName);
+			}
+			// 普通BeanPostProcessor
+			else {
+				nonOrderedPostProcessorNames.add(ppName);
+			}
+		}
+		// 首先执行实现了PriorityOrdered接口的BeanPostProcessor
+		sortPostProcessors(priorityOrderedPostProcessors, beanFactory);
+		registerBeanPostProcessors(beanFactory, priorityOrderedPostProcessors);
+
+		// 然后执行实现了Ordered接口的BeanPostProcessor
+		List<BeanPostProcessor> orderedPostProcessors = new ArrayList<BeanPostProcessor>();
+		for (String ppName : orderedPostProcessorNames) {
+			BeanPostProcessor pp = beanFactory.getBean(ppName, BeanPostProcessor.class);
+			orderedPostProcessors.add(pp);
+			// 实现了MergedBeanDefinitionPostProcessor接口
+			if (pp instanceof MergedBeanDefinitionPostProcessor) {
+				internalPostProcessors.add(pp);
+			}
+		}
+		sortPostProcessors(orderedPostProcessors, beanFactory);
+		// 向beanFactory注册BeanPostProcessor
+		registerBeanPostProcessors(beanFactory, orderedPostProcessors);
+
+		// 最后执行普通BeanPostProcessor
+		List<BeanPostProcessor> nonOrderedPostProcessors = new ArrayList<BeanPostProcessor>();
+		for (String ppName : nonOrderedPostProcessorNames) {
+			BeanPostProcessor pp = beanFactory.getBean(ppName, BeanPostProcessor.class);
+			nonOrderedPostProcessors.add(pp);
+			if (pp instanceof MergedBeanDefinitionPostProcessor) {
+				internalPostProcessors.add(pp);
+			}
+		}
+		registerBeanPostProcessors(beanFactory, nonOrderedPostProcessors);
+		// 重新注册所有内部BeanPostProcessor，将其移到处理器链的末尾
+		sortPostProcessors(internalPostProcessors, beanFactory);
+		registerBeanPostProcessors(beanFactory, internalPostProcessors);
+		// 重新注册用于将内部bean检测为ApplicationListener的后处理器，将其移到处理器链的末尾
+		beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(applicationContext));
+	}
+
+	private static void registerBeanPostProcessors(
+			ConfigurableListableBeanFactory beanFactory, List<BeanPostProcessor> postProcessors) {
+        // 遍历向beanFactory中注册BeanPostProcessor
+		for (BeanPostProcessor postProcessor : postProcessors) {
+			beanFactory.addBeanPostProcessor(postProcessor);
+		}
+	}
+}
+
+public abstract class AbstractBeanFactory extends FactoryBeanRegistrySupport implements ConfigurableBeanFactory {
+	@Override
+	public void addBeanPostProcessor(BeanPostProcessor beanPostProcessor) {
+		Assert.notNull(beanPostProcessor, "BeanPostProcessor must not be null");
+		// 先移除，再重新添加到处理器链的末尾
+		this.beanPostProcessors.remove(beanPostProcessor);
+		this.beanPostProcessors.add(beanPostProcessor);
+		// 是否属于InstantiationAwareBeanPostProcessor（对象实例化前后以及实例化后设置propertyValues的回调）类型
+		if (beanPostProcessor instanceof InstantiationAwareBeanPostProcessor) {
+			this.hasInstantiationAwareBeanPostProcessors = true;
+		}
+		// 是否属于InstantiationAwareBeanPostProcessor（作用于Bean的销毁）类型
+		if (beanPostProcessor instanceof DestructionAwareBeanPostProcessor) {
+			this.hasDestructionAwareBeanPostProcessors = true;
+		}
+	}
+}
+
+public abstract class AbstractApplicationContext extends DefaultResourceLoader
+		implements ConfigurableApplicationContext, DisposableBean {
+	// 初始化MessageSource组件
+    protected void initMessageSource() {
+        ConfigurableListableBeanFactory beanFactory = getBeanFactory();
+        // xml文件中是否定义了id为messageSource的bean对象
+        if (beanFactory.containsLocalBean(MESSAGE_SOURCE_BEAN_NAME)) {
+            // 获取实例对象
+            this.messageSource = beanFactory.getBean(MESSAGE_SOURCE_BEAN_NAME, MessageSource.class);
+            // Make MessageSource aware of parent MessageSource.
+            if (this.parent != null && this.messageSource instanceof HierarchicalMessageSource) {
+                // 强制转换
+                HierarchicalMessageSource hms = (HierarchicalMessageSource) this.messageSource;
+                if (hms.getParentMessageSource() == null) {
+                    // 设置父MessageSource
+                    hms.setParentMessageSource(getInternalParentMessageSource());
+                }
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Using MessageSource [" + this.messageSource + "]");
+            }
+        }
+        else {
+            // 没有在配置中定义，则创建默认的DelegatingMessageSource对象
+            DelegatingMessageSource dms = new DelegatingMessageSource();
+            dms.setParentMessageSource(getInternalParentMessageSource());
+            this.messageSource = dms;
+            // 注册到BeanFactory容器中，其他组件需要使用，可以自动注入
+            beanFactory.registerSingleton(MESSAGE_SOURCE_BEAN_NAME, this.messageSource);
+            if (logger.isDebugEnabled()) {
+                logger.debug("Unable to locate MessageSource with name '" + MESSAGE_SOURCE_BEAN_NAME +
+                        "': using default [" + this.messageSource + "]");
+            }
+        }
+    }
+    // 注册事件派发器
+	protected void initApplicationEventMulticaster() {
+		ConfigurableListableBeanFactory beanFactory = getBeanFactory();
+		// xml文件中是否定义了id为applicationEventMulticaster的bean对象
+		if (beanFactory.containsLocalBean(APPLICATION_EVENT_MULTICASTER_BEAN_NAME)) {
+		    // 获取实例对象
+			this.applicationEventMulticaster =
+					beanFactory.getBean(APPLICATION_EVENT_MULTICASTER_BEAN_NAME, ApplicationEventMulticaster.class);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Using ApplicationEventMulticaster [" + this.applicationEventMulticaster + "]");
+			}
+		}
+		else {
+		    // 没有在配置中定义，则创建默认的SimpleApplicationEventMulticaster对象
+			this.applicationEventMulticaster = new SimpleApplicationEventMulticaster(beanFactory);
+			// 注册到BeanFactory容器中，其他组件需要使用，可以自动注入
+			beanFactory.registerSingleton(APPLICATION_EVENT_MULTICASTER_BEAN_NAME, this.applicationEventMulticaster);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Unable to locate ApplicationEventMulticaster with name '" +
+						APPLICATION_EVENT_MULTICASTER_BEAN_NAME +
+						"': using default [" + this.applicationEventMulticaster + "]");
+			}
+		}
+	}
+	// 留个子类实现自定义逻辑，或者实例化一些特殊的bean
+    protected void onRefresh() throws BeansException {
+        // For subclasses: do nothing by default.
+    }
+    // 注册监听器（绑定到事件派发器）
+    protected void registerListeners() {
+        // 手动注册的监听器
+        for (ApplicationListener<?> listener : getApplicationListeners()) {
+            getApplicationEventMulticaster().addApplicationListener(listener);
+        }
+
+        // 从容器中获取实现了ApplicationListener接口的Bean
+        String[] listenerBeanNames = getBeanNamesForType(ApplicationListener.class, true, false);
+        for (String listenerBeanName : listenerBeanNames) {
+            getApplicationEventMulticaster().addApplicationListenerBean(listenerBeanName);
+        }
+
+        // 到这里SimpleApplicationEventMulticaster已经初始化完了，可以发布一些早期事件
+        Set<ApplicationEvent> earlyEventsToProcess = this.earlyApplicationEvents;
+        this.earlyApplicationEvents = null;
+        if (earlyEventsToProcess != null) {
+            for (ApplicationEvent earlyEvent : earlyEventsToProcess) {
+                // 事件发布
+                getApplicationEventMulticaster().multicastEvent(earlyEvent);
+            }
+        }
+    }
+    // 完成容器刷新
+    protected void finishRefresh() {
+        // 初始化生命周期处理器
+        initLifecycleProcessor();
+
+        // 首先将刷新完成事件传播到生命周期处理器
+        getLifecycleProcessor().onRefresh();
+
+        // 发布容器刷新完成事件
+        publishEvent(new ContextRefreshedEvent(this));
+
+        // Participate in LiveBeansView MBean, if active.
+        LiveBeansView.registerApplicationContext(this);
+    }
+	protected void initLifecycleProcessor() {
+		ConfigurableListableBeanFactory beanFactory = getBeanFactory();
+		// xml文件中是否定义了id为lifecycleProcessor的bean对象
+		if (beanFactory.containsLocalBean(LIFECYCLE_PROCESSOR_BEAN_NAME)) {
+			this.lifecycleProcessor =
+					beanFactory.getBean(LIFECYCLE_PROCESSOR_BEAN_NAME, LifecycleProcessor.class);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Using LifecycleProcessor [" + this.lifecycleProcessor + "]");
+			}
+		}
+		else {
+		    // 没有在配置中定义，则创建默认的DefaultLifecycleProcessor对象
+			DefaultLifecycleProcessor defaultProcessor = new DefaultLifecycleProcessor();
+			defaultProcessor.setBeanFactory(beanFactory);
+			this.lifecycleProcessor = defaultProcessor;
+			beanFactory.registerSingleton(LIFECYCLE_PROCESSOR_BEAN_NAME, this.lifecycleProcessor);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Unable to locate LifecycleProcessor with name '" +
+						LIFECYCLE_PROCESSOR_BEAN_NAME +
+						"': using default [" + this.lifecycleProcessor + "]");
+			}
+		}
+	}
+    protected void publishEvent(Object event, ResolvableType eventType) {
+		Assert.notNull(event, "Event must not be null");
+		if (logger.isTraceEnabled()) {
+			logger.trace("Publishing event in " + getDisplayName() + ": " + event);
+		}
+		// 如果event不属于ApplicationEvent，则将事件装饰为ApplicationEvent
+		ApplicationEvent applicationEvent;
+		if (event instanceof ApplicationEvent) {
+			applicationEvent = (ApplicationEvent) event;
+		}
+		else {
+			applicationEvent = new PayloadApplicationEvent<Object>(this, event);
+			if (eventType == null) {
+				eventType = ((PayloadApplicationEvent) applicationEvent).getResolvableType();
+			}
+		}
+		// Multicast right now if possible - or lazily once the multicaster is initialized
+		if (this.earlyApplicationEvents != null) {
+			this.earlyApplicationEvents.add(applicationEvent);
+		}
+		else {
+		    // 事件发布
+			getApplicationEventMulticaster().multicastEvent(applicationEvent, eventType);
+		}
+		// 通过父容器发布事件
+		if (this.parent != null) {
+			if (this.parent instanceof AbstractApplicationContext) {
+				((AbstractApplicationContext) this.parent).publishEvent(event, eventType);
+			}
+			else {
+				this.parent.publishEvent(event);
+			}
+		}
+	}
+}
+
+public class SimpleApplicationEventMulticaster extends AbstractApplicationEventMulticaster {
+    // 发布事件
+	@Override
+	public void multicastEvent(ApplicationEvent event) {
+		multicastEvent(event, resolveDefaultEventType(event));
+	}
+	@Override
+	public void multicastEvent(final ApplicationEvent event, ResolvableType eventType) {
+		ResolvableType type = (eventType != null ? eventType : resolveDefaultEventType(event));
+		// 获取需要发布的事件列表
+		for (final ApplicationListener<?> listener : getApplicationListeners(event, type)) {
+		    // 获取异步执行器（线程池）
+			Executor executor = getTaskExecutor();
+			if (executor != null) {
+				executor.execute(new Runnable() {
+					@Override
+					public void run() {
+					    // 异步执行(listener.onApplicationEvent(event))
+						invokeListener(listener, event);
+					}
+				});
+			}
+			else {
+			    // 直接执行(listener.onApplicationEvent(event))
+				invokeListener(listener, event);
+			}
+		}
+	}
+}

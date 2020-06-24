@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:mvc="http://www.springframework.org/schema/mvc"
+       xmlns:aop="http://www.springframework.org/schema/aop"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+	http://www.springframework.org/schema/beans/spring-beans.xsd
+	http://www.springframework.org/schema/context
+	http://www.springframework.org/schema/context/spring-context.xsd
+    http://www.springframework.org/schema/aop
+	http://www.springframework.org/schema/aop/spring-aop-4.0.xsd
+	http://www.springframework.org/schema/mvc
+	http://www.springframework.org/schema/mvc/spring-mvc-3.0.xsd">
+    <!-- 配置SpringMVC -->
+    <!-- 1.开启SpringMVC注解模式 -->
+    <!-- 简化配置：
+        (1)自动注册DefaultAnootationHandlerMapping,AnotationMethodHandlerAdapter
+        (2)提供一些列：数据绑定，数字和日期的format @NumberFormat, @DateTimeFormat, xml,json默认读写支持 -->
+    <mvc:annotation-driven/>
+
+    <!-- 2.静态资源默认servlet配置
+        (1)加入对静态资源的处理：js,gif,png
+        (2)允许使用"/"做整体映射 -->
+    <mvc:default-servlet-handler/>
+
+    <!-- 3.配置jsp 显示ViewResolver -->
+    <bean class="org.springframework.web.servlet.view.InternalResourceViewResolver">
+        <property name="viewClass" value="org.springframework.web.servlet.view.JstlView"/>
+        <property name="prefix" value="/WEB-INF/jsp/"/>
+        <property name="suffix" value=".jsp"/>
+    </bean>
+
+    <!-- 4.扫描web相关的bean
+        annotation-config：是否激活属性注入注解
+        name-generator：Bean的ID策略生成器
+        resource-pattern：对资源进行筛选的正则表达式，这边是个大的范畴，具体细分在include-filter与exclude-filter中进行
+        scope-resolver：scope代理，与scope-resolver只能同时配置一个
+        scoped-proxy：scope解析器 ，与scoped-proxy只能同时配置一个
+        use-default-filters：是否使用默认的过滤器，默认值true  -->
+    <context:component-scan base-package="com.wpc.controller"
+                            annotation-config="true"
+                            name-generator="org.springframework.context.annotation.AnnotationBeanNameGenerator"
+                            resource-pattern="**/*.class"
+                            use-default-filters="true"
+                            scope-resolver="org.springframework.context.annotation.AnnotationScopeMetadataResolver" />
+                            <!--scoped-proxy="no"/>-->
+
+    <!-- 启用 aspectj 方式 AOP
+    proxy-target-class属性：用来设置JDK动态代理和CGLIB动态代理之间的切换
+    expose-proxy属性：暴露当前的代理对象 -->
+    <aop:aspectj-autoproxy proxy-target-class="false" expose-proxy="false">
+        <!-- 正则匹配，判断哪些Aspect切面符合要求 -->
+        <aop:include name="log.*"/>
+    </aop:aspectj-autoproxy>
+
+</beans>

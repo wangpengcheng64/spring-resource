@@ -1,0 +1,294 @@
+Spring容器初始化--BeanFactory的预准备工作及PostProcessBeanFactory的处理
+public abstract class AbstractApplicationContext extends DefaultResourceLoader
+		implements ConfigurableApplicationContext, DisposableBean {
+    public void refresh() throws BeansException, IllegalStateException {
+        synchronized (this.startupShutdownMonitor) {
+            ...
+            // 设置BeanFactory的类加载器，添加几个BeanPostProcessor，手动注册几个特殊的bean
+            prepareBeanFactory(beanFactory);
+            try {
+                 // 这里是提供给子类的扩展点，到这里的时候，所有的Bean定义信息都加载、注册完成了，但是都还没有初始化
+                 // 作用是在BeanFactory准备工作完成后做一些定制化的处理，修改bean的定义信息或注册BeanPostProcessor组件等
+                 postProcessBeanFactory(beanFactory);
+                 // 实例化BeanFactoryPostProcessor各个实现类，并调用其postProcessBeanFactory(factory)方法
+                 invokeBeanFactoryPostProcessors(beanFactory);
+            ...
+    }
+    protected void prepareBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+		// 设置类加载器，使用当前ApplicationContext的类加载器
+		beanFactory.setBeanClassLoader(getClassLoader());
+		//设置bean表达式解析器
+		beanFactory.setBeanExpressionResolver(new StandardBeanExpressionResolver(beanFactory.getBeanClassLoader()));
+		// 继承了PropertyEditorRegistrar，使用资源编辑器来填充指定的PropertyEditorRegistry
+		beanFactory.addPropertyEditorRegistrar(new ResourceEditorRegistrar(this, getEnvironment()));
+		// 注册Bean的后置处理器，该后置处理器处理实现了Aware接口的bean实例化时属性注入
+		// 在BeanFactory中存储了beanPostProcessors的列表，在Bean初始化时，列表中的PostProcessor都会执行
+		beanFactory.addBeanPostProcessor(new ApplicationContextAwareProcessor(this));
+		// 自动装配时忽略实现了以下一个接口的Bean
+		beanFactory.ignoreDependencyInterface(EnvironmentAware.class);
+		beanFactory.ignoreDependencyInterface(EmbeddedValueResolverAware.class);
+		beanFactory.ignoreDependencyInterface(ResourceLoaderAware.class);
+		beanFactory.ignoreDependencyInterface(ApplicationEventPublisherAware.class);
+		beanFactory.ignoreDependencyInterface(MessageSourceAware.class);
+		beanFactory.ignoreDependencyInterface(ApplicationContextAware.class);
+		// 注册可以解析的自动装配，能直接在任何组件中自动注入
+		beanFactory.registerResolvableDependency(BeanFactory.class, beanFactory);
+		beanFactory.registerResolvableDependency(ResourceLoader.class, this);
+		beanFactory.registerResolvableDependency(ApplicationEventPublisher.class, this);
+		beanFactory.registerResolvableDependency(ApplicationContext.class, this);
+		// 如果Bean实现了ApplicationListener接口，实例化后就加入到事件监听器列表
+		beanFactory.addBeanPostProcessor(new ApplicationListenerDetector(this));
+
+		// 检查容器中是否包含名称为loadTimeWeaver的bean，增加对Aspectj的支持
+		if (beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {
+			beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));
+			// Set a temporary ClassLoader for type matching.
+			beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));
+		}
+		// 注入几个单实例bean：Environment/SystemProperties/SystemEnvironment
+		if (!beanFactory.containsLocalBean(ENVIRONMENT_BEAN_NAME)) {
+			beanFactory.registerSingleton(ENVIRONMENT_BEAN_NAME, getEnvironment());
+		}
+		if (!beanFactory.containsLocalBean(SYSTEM_PROPERTIES_BEAN_NAME)) {
+			beanFactory.registerSingleton(SYSTEM_PROPERTIES_BEAN_NAME, getEnvironment().getSystemProperties());
+		}
+		if (!beanFactory.containsLocalBean(SYSTEM_ENVIRONMENT_BEAN_NAME)) {
+			beanFactory.registerSingleton(SYSTEM_ENVIRONMENT_BEAN_NAME, getEnvironment().getSystemEnvironment());
+		}
+	}
+	// 由子类实现
+	protected void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+	}
+	protected void invokeBeanFactoryPostProcessors(ConfigurableListableBeanFactory beanFactory) {
+		// 实例化BeanFactoryPostProcessor各个实现类，并调用其postProcessBeanFactory(factory)方法
+		// getBeanFactoryPostProcessors()，获取自定义BeanFactoryPostProcessor，默认为空
+		PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors(beanFactory, getBeanFactoryPostProcessors());
+		// 检查容器中是否包含名称为loadTimeWeaver的bean，增加对Aspectj的支持
+		if (beanFactory.getTempClassLoader() == null && beanFactory.containsBean(LOAD_TIME_WEAVER_BEAN_NAME)) {
+			beanFactory.addBeanPostProcessor(new LoadTimeWeaverAwareProcessor(beanFactory));
+			beanFactory.setTempClassLoader(new ContextTypeMatchClassLoader(beanFactory.getBeanClassLoader()));
+		}
+	}
+}
+public class MyApplicationContext extends ClassPathXmlApplicationContext {
+    // 构造方法
+    public MyApplicationContext(String configLocation) {
+        super(configLocation);
+    }
+    // 重写postProcessBeanFactory方法
+    @Override
+    protected void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) {
+        // 在invokeBeanFactoryPostProcessors操作之前，手动注入BeanFactoryPostProcessor实现类
+        // 执行时期，在下面分析
+        this.addBeanFactoryPostProcessor(new ManualBeanFactoryPostProcessor());
+        String[] beanDefinitionNames = beanFactory.getBeanDefinitionNames();
+        for (String beanDefinitionName : beanDefinitionNames) {
+            System.out.println("================:" + beanDefinitionName);
+        }
+    }
+}
+class PostProcessorRegistrationDelegate {
+    // 实例化BeanFactoryPostProcessor各个实现类，并调用其postProcessBeanFactory(factory)方法
+	public static void invokeBeanFactoryPostProcessors(
+			ConfigurableListableBeanFactory beanFactory, List<BeanFactoryPostProcessor> beanFactoryPostProcessors) {
+		// 首先执行自定义的BeanFactoryPostProcessor实现类，及BeanFactory中实现了BeanDefinitionRegistryPostProcessor接口的bean
+		// 用于保存beanFactory中已实例化并执行的BeanFactoryPostProcessor实现类
+		Set<String> processedBeans = new HashSet<String>();
+        // （DefaultListableBeanFactory）beanFactory是否属于BeanDefinitionRegistry
+		if (beanFactory instanceof BeanDefinitionRegistry) {
+			// 强转为BeanDefinitionRegistry类型
+			BeanDefinitionRegistry registry = (BeanDefinitionRegistry) beanFactory;
+			// 用于保存实现了BeanFactoryPostProcessor的
+			List<BeanFactoryPostProcessor> regularPostProcessors = new LinkedList<BeanFactoryPostProcessor>();
+			// 用于保存实现了BeanDefinitionRegistryPostProcessor的
+			List<BeanDefinitionRegistryPostProcessor> registryProcessors = new LinkedList<BeanDefinitionRegistryPostProcessor>();
+            // 遍历所有自定义的BeanFactoryPostProcessor
+			for (BeanFactoryPostProcessor postProcessor : beanFactoryPostProcessors) {
+                // 如果是实现了BeanDefinitionRegistryPostProcessor接口
+				if (postProcessor instanceof BeanDefinitionRegistryPostProcessor) {
+					BeanDefinitionRegistryPostProcessor registryProcessor =
+							(BeanDefinitionRegistryPostProcessor) postProcessor;
+				    // 执行postProcessBeanDefinitionRegistry()方法
+					registryProcessor.postProcessBeanDefinitionRegistry(registry);
+					// 加到registryProcessors容器
+					registryProcessors.add(registryProcessor);
+				}
+				else {
+                    // 否则加到regularPostProcessors容器
+					regularPostProcessors.add(postProcessor);
+				}
+			}
+			// 处理BeanFactory中实现了BeanDefinitionRegistryPostProcessor接口的对象
+			// 用于保存实现了BeanDefinitionRegistryPostProcessor接口的对象
+			List<BeanDefinitionRegistryPostProcessor> currentRegistryProcessors = new ArrayList<BeanDefinitionRegistryPostProcessor>();
+			// 首先执行实现了PriorityOrdered接口的BeanDefinitionRegistryPostProcessor
+			// 从beanFactory中获取所有实现了BeanDefinitionRegistryPostProcessor接口的bean名称
+			String[] postProcessorNames =
+					beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+			for (String ppName : postProcessorNames) {
+                // 如果实现了PriorityOrdered接口
+				if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+					// 根据bean名称和class类型获取实例对象，并加入到currentRegistryProcessors中
+					currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+					// 加到processedBeans容器，用于判断BeanFactoryPostProcessor实现类是否已实例化并执行
+					processedBeans.add(ppName);
+				}
+			}
+			sortPostProcessors(currentRegistryProcessors, beanFactory);
+			// 将其加入到registryProcessors中，下面统一执行
+			registryProcessors.addAll(currentRegistryProcessors);
+			// 执行BeanDefinitionRegistryPostProcessor的postProcessBeanDefinitionRegistry(registry)方法
+			invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+			// 清空currentRegistryProcessors容器
+			currentRegistryProcessors.clear();
+
+			// 然后执行实现了Ordered接口的BeanDefinitionRegistryPostProcessor
+			// 这里再次从beanFactory中获取所有实现了BeanDefinitionRegistryPostProcessor接口的bean名称
+			// 是因为在上一步执行过程可能会产生新的BeanDefinitionRegistryPostProcessor接口实现类
+			postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+			for (String ppName : postProcessorNames) {
+				// 如果没加载过，并实现了Ordered接口
+				if (!processedBeans.contains(ppName) && beanFactory.isTypeMatch(ppName, Ordered.class)) {
+					currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+					processedBeans.add(ppName);
+				}
+			}
+			// 同上
+			sortPostProcessors(currentRegistryProcessors, beanFactory);
+			registryProcessors.addAll(currentRegistryProcessors);
+			invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+			currentRegistryProcessors.clear();
+
+			// 最后执行没有实现任何优先级或者是顺序接口的BeanDefinitionRegistryPostProcessors
+			boolean reiterate = true;
+			while (reiterate) {
+				reiterate = false;
+				// 从beanFactory中获取所有实现了BeanDefinitionRegistryPostProcessor接口的bean名称
+				postProcessorNames = beanFactory.getBeanNamesForType(BeanDefinitionRegistryPostProcessor.class, true, false);
+				for (String ppName : postProcessorNames) {
+					// 执行剩下未加载的
+					if (!processedBeans.contains(ppName)) {
+						currentRegistryProcessors.add(beanFactory.getBean(ppName, BeanDefinitionRegistryPostProcessor.class));
+						processedBeans.add(ppName);
+						reiterate = true;
+					}
+				}
+				// 同上
+				sortPostProcessors(currentRegistryProcessors, beanFactory);
+				registryProcessors.addAll(currentRegistryProcessors);
+				invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+				currentRegistryProcessors.clear();
+			}
+			// 执行所有BeanFactoryPostProcessor的postProcessBeanFactory(beanFactory)方法
+			invokeBeanFactoryPostProcessors(registryProcessors, beanFactory);
+			invokeBeanFactoryPostProcessors(regularPostProcessors, beanFactory);
+		}
+		else {
+			// beanFactory不属于BeanDefinitionRegistry
+			// 则直接执行所有自定义BeanFactoryPostProcessor的postProcessBeanFactory(beanFactory)方法
+			invokeBeanFactoryPostProcessors(beanFactoryPostProcessors, beanFactory);
+		}
+
+		// 接下来处理BeanFactory中实现了BeanFactoryPostProcessor接口的bean
+		String[] postProcessorNames =
+				beanFactory.getBeanNamesForType(BeanFactoryPostProcessor.class, true, false);
+
+		// 将实现了PriorityOrdered,Ordered接口及其他的分成三组
+		List<BeanFactoryPostProcessor> priorityOrderedPostProcessors = new ArrayList<BeanFactoryPostProcessor>();
+		List<String> orderedPostProcessorNames = new ArrayList<String>();
+		List<String> nonOrderedPostProcessorNames = new ArrayList<String>();
+		for (String ppName : postProcessorNames) {
+			if (processedBeans.contains(ppName)) {
+				// 如果这个bean在上面步骤已经处理，则跳过
+			}
+			else if (beanFactory.isTypeMatch(ppName, PriorityOrdered.class)) {
+				priorityOrderedPostProcessors.add(beanFactory.getBean(ppName, BeanFactoryPostProcessor.class));
+			}
+			else if (beanFactory.isTypeMatch(ppName, Ordered.class)) {
+				orderedPostProcessorNames.add(ppName);
+			}
+			else {
+				nonOrderedPostProcessorNames.add(ppName);
+			}
+		}
+
+		// 首先, 执行实现了PriorityOrdered接口的BeanFactoryPostProcessor
+		sortPostProcessors(priorityOrderedPostProcessors, beanFactory);
+		// 执行BeanFactoryPostProcessor的postProcessBeanFactory(beanFactory)方法
+		invokeBeanFactoryPostProcessors(priorityOrderedPostProcessors, beanFactory);
+
+		// 然后, 执行实现了Ordered接口的BeanFactoryPostProcessor
+		List<BeanFactoryPostProcessor> orderedPostProcessors = new ArrayList<BeanFactoryPostProcessor>();
+		for (String postProcessorName : orderedPostProcessorNames) {
+			orderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+		}
+		sortPostProcessors(orderedPostProcessors, beanFactory);
+		invokeBeanFactoryPostProcessors(orderedPostProcessors, beanFactory);
+
+		// 最后执行没有实现任何优先级或者是顺序接口的BeanFactoryPostProcessor
+		List<BeanFactoryPostProcessor> nonOrderedPostProcessors = new ArrayList<BeanFactoryPostProcessor>();
+		for (String postProcessorName : nonOrderedPostProcessorNames) {
+			nonOrderedPostProcessors.add(beanFactory.getBean(postProcessorName, BeanFactoryPostProcessor.class));
+		}
+		invokeBeanFactoryPostProcessors(nonOrderedPostProcessors, beanFactory);
+
+		// 清除beanFactory中的元数据缓存，因为在执行BeanFactoryPostProcessor时可能已经对其修改过
+		beanFactory.clearMetadataCache();
+	}
+    private static void invokeBeanDefinitionRegistryPostProcessors(
+            Collection<? extends BeanDefinitionRegistryPostProcessor> postProcessors, BeanDefinitionRegistry registry) {
+        // 遍历postProcessors，执行BeanDefinitionRegistryPostProcessor的postProcessBeanDefinitionRegistry(registry)方法
+        for (BeanDefinitionRegistryPostProcessor postProcessor : postProcessors) {
+            postProcessor.postProcessBeanDefinitionRegistry(registry);
+        }
+    }
+    private static void invokeBeanFactoryPostProcessors(
+            Collection<? extends BeanFactoryPostProcessor> postProcessors, ConfigurableListableBeanFactory beanFactory) {
+        // 遍历postProcessors，执行BeanFactoryPostProcessor的postProcessBeanFactory(beanFactory)方法
+        for (BeanFactoryPostProcessor postProcessor : postProcessors) {
+            postProcessor.postProcessBeanFactory(beanFactory);
+        }
+    }
+}
+
+package com.wpc.config.processor;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor;
+import org.springframework.stereotype.Component;
+
+@Component
+public class MyBeanDefinitionRegistryPostProcessor implements BeanDefinitionRegistryPostProcessor {
+    @Override
+    public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) throws BeansException {
+        System.out.println("执行了MyBeanDefinitionRegistryPostProcessor的postProcessBeanDefinitionRegistry方法");
+    }
+
+    @Override
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException {
+        System.out.println("执行了MyBeanDefinitionRegistryPostProcessor的postProcessBeanFactory方法");
+    }
+}
+
+package com.wpc.config.processor;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.stereotype.Component;
+
+@Component
+public class MyBeanFactoryPostProcessor implements BeanFactoryPostProcessor {
+    @Override
+    public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException {
+        System.out.println("执行了MyBeanFactoryPostProcessor的postProcessBeanFactory方法");
+    }
+}
+
+上面两个自定义BeanFactoryPostProcessor的执行结果：
+    执行了MyBeanDefinitionRegistryPostProcessor的postProcessBeanDefinitionRegistry方法
+    执行了MyBeanDefinitionRegistryPostProcessor的postProcessBeanFactory方法
+    执行了手动注册的MyBeanFactoryPostProcessor的postProcessBeanFactory方法
+    执行了MyBeanFactoryPostProcessor的postProcessBeanFactory方法

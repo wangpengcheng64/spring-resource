@@ -1,0 +1,363 @@
+Spring容器初始化--Bean的实例化过程(二)之doGetBean方法
+public abstract class AbstractBeanFactory extends FactoryBeanRegistrySupport implements ConfigurableBeanFactory {
+	@Override
+	public Object getBean(String name) throws BeansException {
+	    // 通过beanName获取bean实例
+		return doGetBean(name, null, null, false);
+	}
+    protected <T> T doGetBean(final String name, final Class<T> requiredType, final Object[] args, boolean typeCheckOnly)
+            throws BeansException {
+        // 获取最终beanName，去除FactoryBean前缀“&”符号，别名映射解析
+        final String beanName = transformedBeanName(name);
+        Object bean;
+        // 从缓存中获取bean单实例对象（Spring容器初始化--Bean的实例化过程(一)中有介绍）
+        Object sharedInstance = getSingleton(beanName);
+        if (sharedInstance != null && args == null) {
+            if (logger.isDebugEnabled()) {
+                // 当前beanName对应的bean实例是否在创建中
+                if (isSingletonCurrentlyInCreation(beanName)) {
+                    logger.debug("Returning eagerly cached instance of singleton bean '" + beanName +
+                            "' that is not fully initialized yet - a consequence of a circular reference");
+                }
+                else {
+                    logger.debug("Returning cached instance of singleton bean '" + beanName + "'");
+                }
+            }
+            // 获取给定bean实例的对象，主要是处理通过FactoryBean获取对象的情况
+            bean = getObjectForBeanInstance(sharedInstance, name, beanName, null);
+        }
+        else {
+            // 循环引用处理：判断当前beanName对应的实例是否正在创建
+            if (isPrototypeCurrentlyInCreation(beanName)) {
+                throw new BeanCurrentlyInCreationException(beanName);
+            }
+            // 获取父容器parentBeanFactory
+            BeanFactory parentBeanFactory = getParentBeanFactory();
+            // 父容器不为空 && 当前容器BeanFactory不存在beanName对应的Bean
+            if (parentBeanFactory != null && !containsBeanDefinition(beanName)) {
+                // 通过别名解析确定原始的bean名称(如有则加上&前缀)，从父容器中查找
+                String nameToLookup = originalBeanName(name);
+                if (args != null) {
+                    return (T) parentBeanFactory.getBean(nameToLookup, args);
+                }
+                else {
+                    return parentBeanFactory.getBean(nameToLookup, requiredType);
+                }
+            }
+            // 将beanName对应的bean标记为已经创建(或即将创建)
+            if (!typeCheckOnly) {
+                markBeanAsCreated(beanName);
+            }
+            try {
+                // 获取bean定义信息，并且判断该bean是否属于抽象类，如果是则抛出异常
+                final RootBeanDefinition mbd = getMergedLocalBeanDefinition(beanName);
+                checkMergedBeanDefinition(mbd, beanName, args);
+                // 获取当前bean所依赖的bean列表，并进行初始化
+                String[] dependsOn = mbd.getDependsOn();
+                if (dependsOn != null) {
+                    for (String dep : dependsOn) {
+                        // 检测是否循环依赖，即A依赖B，B依赖A
+                        if (isDependent(beanName, dep)) {
+                            throw new BeanCreationException(mbd.getResourceDescription(), beanName,
+                                    "Circular depends-on relationship between '" + beanName + "' and '" + dep + "'");
+                        }
+                        // 注册bean的依赖关系
+                        registerDependentBean(dep, beanName);
+                        // 获取dep实例
+                        getBean(dep);
+                    }
+                }
+                // 开始创建bean实例，如果scope为singleton
+                if (mbd.isSingleton()) {
+                    // 创建ObjectFactory对象，重写getObject()
+                    sharedInstance = getSingleton(beanName, new ObjectFactory<Object>() {
+                        @Override
+                        public Object getObject() throws BeansException {
+                            try {
+                                // 创建Bean实例，下一节介绍
+                                return createBean(beanName, mbd, args);
+                            }
+                            catch (BeansException ex) {
+                                // 销毁指定的bean实例
+                                destroySingleton(beanName);
+                                throw ex;
+                            }
+                        }
+                    });
+                    bean = getObjectForBeanInstance(sharedInstance, name, beanName, mbd);
+                }
+                // 如果scope为prototype
+                else if (mbd.isPrototype()) {
+                    Object prototypeInstance = null;
+                    try {
+                        // 将beanName保存在prototypesCurrentlyInCreation（scope为prototype，当前正在创建中）容器中
+                        beforePrototypeCreation(beanName);
+                        prototypeInstance = createBean(beanName, mbd, args);
+                    }
+                    finally {
+                        // 将beanName从prototypesCurrentlyInCreation容器中移除
+                        afterPrototypeCreation(beanName);
+                    }
+                    bean = getObjectForBeanInstance(prototypeInstance, name, beanName, mbd);
+                }
+                // scope为其他类型
+                else {
+                    // 从bean定义信息中获取scopeName，并通过scopeName获取Scope对象
+                    String scopeName = mbd.getScope();
+                    final Scope scope = this.scopes.get(scopeName);
+                    if (scope == null) {
+                        throw new IllegalStateException("No Scope registered for scope name '" + scopeName + "'");
+                    }
+                    try {
+                        // 通过Scope对象获取bean实例(创建ObjectFactory对象，重写getObject())
+                        Object scopedInstance = scope.get(beanName, new ObjectFactory<Object>() {
+                            @Override
+                            public Object getObject() throws BeansException {
+                                beforePrototypeCreation(beanName);
+                                try {
+                                    return createBean(beanName, mbd, args);
+                                }
+                                finally {
+                                    afterPrototypeCreation(beanName);
+                                }
+                            }
+                        });
+                        bean = getObjectForBeanInstance(scopedInstance, name, beanName, mbd);
+                    }
+                    catch (IllegalStateException ex) {
+                        throw new BeanCreationException(beanName,
+                                "Scope '" + scopeName + "' is not active for the current thread; consider " +
+                                "defining a scoped proxy for this bean if you intend to refer to it from a singleton",ex);
+                    }
+                }
+            }
+            catch (BeansException ex) {
+                // 清楚beanName对应的bean标记状态(已经创建或即将创建)
+                cleanupAfterBeanCreationFailure(beanName);
+                throw ex;
+            }
+        }
+        // 检查所需的类型是否与实际bean实例的类型匹配，如果不匹配，则获取类型转换器进行尝试转换
+        if (requiredType != null && bean != null && !requiredType.isInstance(bean)) {
+            try {
+                return getTypeConverter().convertIfNecessary(bean, requiredType);
+            }
+            catch (TypeMismatchException ex) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Failed to convert bean '" + name + "' to required type '" +
+                            ClassUtils.getQualifiedName(requiredType) + "'", ex);
+                }
+                throw new BeanNotOfRequiredTypeException(name, requiredType, bean.getClass());
+            }
+        }
+        return (T) bean;
+    }
+    protected Object getObjectForBeanInstance(Object beanInstance, String name, String beanName, RootBeanDefinition mbd) {
+
+        // name为工厂引用名称(name以“&”为前缀) && bean实例不是FactoryBean类型
+        if (BeanFactoryUtils.isFactoryDereference(name) && !(beanInstance instanceof FactoryBean)) {
+            throw new BeanIsNotAFactoryException(transformedBeanName(name), beanInstance.getClass());
+        }
+        // bean实例不是FactoryBean类型 || bean实例是FactoryBean类型，并且name为工厂引用名称(name以“&”为前缀)，即获取FactoryBean本身
+        if (!(beanInstance instanceof FactoryBean) || BeanFactoryUtils.isFactoryDereference(name)) {
+            return beanInstance;
+        }
+        // bean实例是FactoryBean类型，但name不是工厂引用名称，即通过FactoryBean获取对象实例
+        Object object = null;
+        if (mbd == null) {
+            // 从FactoryBean对象缓存容器中获取
+            object = getCachedObjectForFactoryBean(beanName);
+        }
+        if (object == null) {
+            // 将beanInstance强转为FactoryBean类型
+            FactoryBean<?> factory = (FactoryBean<?>) beanInstance;
+            // 获取bean定义信息
+            if (mbd == null && containsBeanDefinition(beanName)) {
+                mbd = getMergedLocalBeanDefinition(beanName);
+            }
+            // 判断当前bean定义信息是否为合成的
+            boolean synthetic = (mbd != null && mbd.isSynthetic());
+            // 通过FactoryBean获取对象实例
+            object = getObjectFromFactoryBean(factory, beanName, !synthetic);
+        }
+        return object;
+    }
+}
+public abstract class FactoryBeanRegistrySupport extends DefaultSingletonBeanRegistry {
+    protected Object getObjectFromFactoryBean(FactoryBean<?> factory, String beanName, boolean shouldPostProcess) {
+        // factory是单例的 && 单例缓存容器中存在beanName对应的实例
+		if (factory.isSingleton() && containsSingleton(beanName)) {
+			synchronized (getSingletonMutex()) {
+			    // 从FactoryBean对象缓存容器中获取
+				Object object = this.factoryBeanObjectCache.get(beanName);
+				if (object == null) {
+				    // 执行FactoryBean的getObject()方法获取对象实例
+					object = doGetObjectFromFactoryBean(factory, beanName);
+					// 从FactoryBean对象缓存容器中获取，如果存在，则使用缓存的
+					Object alreadyThere = this.factoryBeanObjectCache.get(beanName);
+					if (alreadyThere != null) {
+						object = alreadyThere;
+					}
+					else {
+						if (object != null && shouldPostProcess) {
+							try {
+							    // 执行所有Bean后置处理器BeanPostProcessor的postProcessAfterInitialization()方法
+								object = postProcessObjectFromFactoryBean(object, beanName);
+							}
+							catch (Throwable ex) {
+								throw new BeanCreationException(beanName,
+										"Post-processing of FactoryBean's singleton object failed", ex);
+							}
+						}
+						// 将beanName对应的实例存入FactoryBean对象缓存容器中
+						this.factoryBeanObjectCache.put(beanName, (object != null ? object : NULL_OBJECT));
+					}
+				}
+				return (object != NULL_OBJECT ? object : null);
+			}
+		}
+		else {
+		    // 执行FactoryBean的getObject()方法获取对象实例
+			Object object = doGetObjectFromFactoryBean(factory, beanName);
+			if (object != null && shouldPostProcess) {
+				try {
+				    // 执行所有Bean后置处理器BeanPostProcessor的postProcessAfterInitialization()方法
+					object = postProcessObjectFromFactoryBean(object, beanName);
+				}
+				catch (Throwable ex) {
+					throw new BeanCreationException(beanName, "Post-processing of FactoryBean's object failed", ex);
+				}
+			}
+			return object;
+		}
+	}
+    private Object doGetObjectFromFactoryBean(final FactoryBean<?> factory, final String beanName)
+			throws BeanCreationException {
+		Object object;
+		try {
+		    // System.getSecurityManager()：当运行未知的Java程序的时候，该程序可能有恶意代码（删除系统文件、重启系统等）
+            // 为了防止运行恶意代码对系统产生影响，需要对运行的代码的权限进行控制，这时候就要启用Java安全管理器。
+			if (System.getSecurityManager() != null) {
+				AccessControlContext acc = getAccessControlContext();
+				try {
+					object = AccessController.doPrivileged(new PrivilegedExceptionAction<Object>() {
+						@Override
+						public Object run() throws Exception {
+								return factory.getObject();
+							}
+						}, acc);
+				}
+				catch (PrivilegedActionException pae) {
+					throw pae.getException();
+				}
+			}
+			else {
+			    // 执行FactoryBean的getObject()方法获取对象实例
+				object = factory.getObject();
+			}
+		}
+		catch (FactoryBeanNotInitializedException ex) {
+			throw new BeanCurrentlyInCreationException(beanName, ex.toString());
+		}
+		catch (Throwable ex) {
+			throw new BeanCreationException(beanName, "FactoryBean threw exception on object creation", ex);
+		}
+		// 如果object为空 && 当前FactoryBean正在创建中，则抛出异常：不接受还没有完全初始化的FactoryBean的getObject()方法返回空值
+		if (object == null && isSingletonCurrentlyInCreation(beanName)) {
+			throw new BeanCurrentlyInCreationException(
+					beanName, "FactoryBean which is currently in creation returned null from getObject");
+		}
+		return object;
+	}
+}
+public class DefaultSingletonBeanRegistry extends SimpleAliasRegistry implements SingletonBeanRegistry {
+    public void registerDependentBean(String beanName, String dependentBeanName) {
+		// 别名解析
+		String canonicalName = canonicalName(beanName);
+		// 从dependentBeanMap容器中获取canonicalName的依赖集合
+		Set<String> dependentBeans = this.dependentBeanMap.get(canonicalName);
+		// 如果canonicalName的依赖集合不为空 && 已经含有dependentBeanName，说明已注册，直接返回
+		if (dependentBeans != null && dependentBeans.contains(dependentBeanName)) {
+			return;
+		}
+		// 同步操作，将dependentBeanName加入到canonicalName的被依赖集合
+		synchronized (this.dependentBeanMap) {
+			dependentBeans = this.dependentBeanMap.get(canonicalName);
+			if (dependentBeans == null) {
+				dependentBeans = new LinkedHashSet<String>(8);
+				this.dependentBeanMap.put(canonicalName, dependentBeans);
+			}
+			dependentBeans.add(dependentBeanName);
+		}
+		// 同步操作，将canonicalName加入到dependentBeanName的依赖集合
+		synchronized (this.dependenciesForBeanMap) {
+			Set<String> dependenciesForBean = this.dependenciesForBeanMap.get(dependentBeanName);
+			if (dependenciesForBean == null) {
+				dependenciesForBean = new LinkedHashSet<String>(8);
+				this.dependenciesForBeanMap.put(dependentBeanName, dependenciesForBean);
+			}
+			dependenciesForBean.add(canonicalName);
+		}
+	}
+    public Object getSingleton(String beanName, ObjectFactory<?> singletonFactory) {
+		Assert.notNull(beanName, "'beanName' must not be null");
+		// 同步，单例创建
+		synchronized (this.singletonObjects) {
+		    // 从单例缓存容器中获取，如果存在则返回，不存在则创建
+			Object singletonObject = this.singletonObjects.get(beanName);
+			if (singletonObject == null) {
+			    // 当这个工厂的单例对象被销毁时，不允许创建单例bean
+				if (this.singletonsCurrentlyInDestruction) {
+					throw new BeanCreationNotAllowedException(beanName,
+							"Singleton bean creation not allowed while singletons of this factory are in destruction " +
+							"(Do not request a bean from a BeanFactory in a destroy method implementation!)");
+				}
+				if (logger.isDebugEnabled()) {
+					logger.debug("Creating shared instance of singleton bean '" + beanName + "'");
+				}
+				// 单例创建前操作，检查该单例是否在创建时需要排除的，并将其保存在singletonsCurrentlyInCreation集合中
+				beforeSingletonCreation(beanName);
+				// 用于标识是否新单例对象
+				boolean newSingleton = false;
+				boolean recordSuppressedExceptions = (this.suppressedExceptions == null);
+				if (recordSuppressedExceptions) {
+					this.suppressedExceptions = new LinkedHashSet<Exception>();
+				}
+				try {
+				    // 执行singletonFactory对象的getObject()方法，获取单例对象
+					singletonObject = singletonFactory.getObject();
+					// 标识为新单例对象
+					newSingleton = true;
+				}
+				catch (IllegalStateException ex) {
+					// Has the singleton object implicitly appeared in the meantime ->
+					// if yes, proceed with it since the exception indicates that state.
+					singletonObject = this.singletonObjects.get(beanName);
+					if (singletonObject == null) {
+						throw ex;
+					}
+				}
+				catch (BeanCreationException ex) {
+					if (recordSuppressedExceptions) {
+						for (Exception suppressedException : this.suppressedExceptions) {
+							ex.addRelatedCause(suppressedException);
+						}
+					}
+					throw ex;
+				}
+				finally {
+					if (recordSuppressedExceptions) {
+						this.suppressedExceptions = null;
+					}
+					// 单例创建后操作，检查该单例是否在创建时需要排除的，并将从singletonsCurrentlyInCreation集合中移除
+					afterSingletonCreation(beanName);
+				}
+				if (newSingleton) {
+				    // 将给定的单例对象添加到该工厂的单例缓存中
+					addSingleton(beanName, singletonObject);
+				}
+			}
+			return (singletonObject != NULL_OBJECT ? singletonObject : null);
+		}
+	}
+}

@@ -1,0 +1,183 @@
+spring tx事务源码解析
+事务四要素：
+    原子性(Atomicity)：即事务是不可分割的最小工作单元，事务内的操作要么全做，要么全不做，不能只做一部分；
+    一致性(Consistency)：在事务执行前数据库的数据处于正确的状态，而事务执行完成后数据库的数据还是处于正确的状态，即数据完整性约束没有被破坏；
+    隔离性(Isolation)：并发事务执行之间无影响，在一个事务内部的操作对其他事务是不产生影响，这需要事务隔离级别来指定隔离性；
+    持久性(Durability)：事务一旦执行成功，它对数据库的数据的改变必须是永久的，不会因各种异常导致数据不一致或丢失。
+事务隔离级别:
+    脏读：一个事务读取到另一事务未提交的更新数据
+    不可重复读：在同一事务中, 多次读取同一数据返回的结果有所不同
+    幻读：一个事务读到另一个事务已提交的insert数据
+
+    读未提交(READ_UNCOMMITTED)：最低隔离级别，一个事务能读取到别的事务未提交的更新数据，很不安全，可能出现丢失更新、脏读、不可重复读、幻读；
+    读已提交(READ_COMMITTED)：一个事务能读取到别的事务提交的更新数据，不能看到未提交的更新数据，不会出现丢失更新、脏读，但可能出现不可重复读、幻读；
+    可重复读(REPEATABLE_READ)：保证同一事务中先后执行的多次查询将返回同一结果，不受其他事务影响，不可能出现丢失更新、脏读、不可重复读，但可能出现幻读；
+    序列化(SERIALIZABLE)：最高隔离级别，不允许事务并发执行，而必须串行化执行，最安全，不可能出现更新、脏读、不可重复读、幻读，但是效率最低。
+
+　　MYSQL：默认为REPEATABLE_READ级别
+　　ORACLE：默认为READ_COMMITTED级别
+
+-------------------------tx事务入口-------------------------
+查看《Spring容器初始化--创建BeanFactory及加载Bean定义信息(三)》可以了解到<tx>标签解析过程
+首先通过命名空间可以在类路径下的spring.handlers中找到对应的处理器，在spring.schemas中找到对应的xsd文件
+获取到注解对应的处理器：http\://www.springframework.org/schema/aop=org.springframework.aop.config.TxNamespaceHandler
+public class TxNamespaceHandler extends NamespaceHandlerSupport {
+    // transaction-manager属性
+	static final String TRANSACTION_MANAGER_ATTRIBUTE = "transaction-manager";
+    // transaction-manager属性默认值transactionManager
+	static final String DEFAULT_TRANSACTION_MANAGER_BEAN_NAME = "transactionManager";
+    // 判断是否设置transaction-manager属性
+	static String getTransactionManagerName(Element element) {
+		return (element.hasAttribute(TRANSACTION_MANAGER_ATTRIBUTE) ?
+				element.getAttribute(TRANSACTION_MANAGER_ATTRIBUTE) : DEFAULT_TRANSACTION_MANAGER_BEAN_NAME);
+	}
+    // 注册对应的解析器
+	@Override
+	public void init() {
+		registerBeanDefinitionParser("advice", new TxAdviceBeanDefinitionParser());
+		registerBeanDefinitionParser("annotation-driven", new AnnotationDrivenBeanDefinitionParser());
+		registerBeanDefinitionParser("jta-transaction-manager", new JtaTransactionManagerBeanDefinitionParser());
+	}
+}
+<tx:annotation-driven />标签对应的解析器是：AnnotationDrivenBeanDefinitionParser，并且执行其parse()方法
+class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
+
+	@Override
+	public BeanDefinition parse(Element element, ParserContext parserContext) {
+		registerTransactionalEventListenerFactory(parserContext);
+		// 获取mode属性值
+		String mode = element.getAttribute("mode");
+		// 是否使用 Aspect 方式实现代理，默认方式为 JDK 的动态代理
+		if ("aspectj".equals(mode)) {
+			// mode="aspectj"
+			registerTransactionAspect(element, parserContext);
+		}
+		else {
+			// mode="proxy"
+			AopAutoProxyConfigurer.configureAutoProxyCreator(element, parserContext);
+		}
+		return null;
+	}
+
+	private void registerTransactionAspect(Element element, ParserContext parserContext) {
+	    // org.springframework.transaction.config.internalTransactionAspect
+		String txAspectBeanName = TransactionManagementConfigUtils.TRANSACTION_ASPECT_BEAN_NAME;
+		// org.springframework.transaction.aspectj.AnnotationTransactionAspect
+		String txAspectClassName = TransactionManagementConfigUtils.TRANSACTION_ASPECT_CLASS_NAME;
+		if (!parserContext.getRegistry().containsBeanDefinition(txAspectBeanName)) {
+		    // 初始化bean定义信息
+			RootBeanDefinition def = new RootBeanDefinition();
+			def.setBeanClassName(txAspectClassName);
+			def.setFactoryMethodName("aspectOf");
+			// 向bean定义中注册事务管理器（transactionManagerBeanName属性赋值）
+			registerTransactionManager(element, def);
+			// 向容器中注册组件AnnotationTransactionAspect
+			parserContext.registerBeanComponent(new BeanComponentDefinition(def, txAspectBeanName));
+		}
+	}
+
+	private static void registerTransactionManager(Element element, BeanDefinition def) {
+	    // bean定义属性列表中添加transactionManagerBeanName属性
+		def.getPropertyValues().add("transactionManagerBeanName",
+				TxNamespaceHandler.getTransactionManagerName(element));
+	}
+
+	private void registerTransactionalEventListenerFactory(ParserContext parserContext) {
+		RootBeanDefinition def = new RootBeanDefinition();
+		def.setBeanClass(TransactionalEventListenerFactory.class);
+		parserContext.registerBeanComponent(new BeanComponentDefinition(def,
+				TransactionManagementConfigUtils.TRANSACTIONAL_EVENT_LISTENER_FACTORY_BEAN_NAME));
+	}
+
+
+	// 内部类，在实际处于代理模式时引入AOP框架依赖关系
+	private static class AopAutoProxyConfigurer {
+		public static void configureAutoProxyCreator(Element element, ParserContext parserContext) {
+		    // 注册自动代理创建器InfrastructureAdvisorAutoProxyCreator
+			AopNamespaceUtils.registerAutoProxyCreatorIfNecessary(parserContext, element);
+
+			String txAdvisorBeanName = TransactionManagementConfigUtils.TRANSACTION_ADVISOR_BEAN_NAME;
+			if (!parserContext.getRegistry().containsBeanDefinition(txAdvisorBeanName)) {
+				Object eleSource = parserContext.extractSource(element);
+
+				// Create the TransactionAttributeSource definition.
+				RootBeanDefinition sourceDef = new RootBeanDefinition(
+						"org.springframework.transaction.annotation.AnnotationTransactionAttributeSource");
+				sourceDef.setSource(eleSource);
+				sourceDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);
+				String sourceName = parserContext.getReaderContext().registerWithGeneratedName(sourceDef);
+
+				// Create the TransactionInterceptor definition.
+				RootBeanDefinition interceptorDef = new RootBeanDefinition(TransactionInterceptor.class);
+				interceptorDef.setSource(eleSource);
+				interceptorDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);
+				registerTransactionManager(element, interceptorDef);
+				interceptorDef.getPropertyValues().add("transactionAttributeSource", new RuntimeBeanReference(sourceName));
+				String interceptorName = parserContext.getReaderContext().registerWithGeneratedName(interceptorDef);
+
+				// Create the TransactionAttributeSourceAdvisor definition.
+				RootBeanDefinition advisorDef = new RootBeanDefinition(BeanFactoryTransactionAttributeSourceAdvisor.class);
+				advisorDef.setSource(eleSource);
+				advisorDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);
+				advisorDef.getPropertyValues().add("transactionAttributeSource", new RuntimeBeanReference(sourceName));
+				advisorDef.getPropertyValues().add("adviceBeanName", interceptorName);
+				if (element.hasAttribute("order")) {
+					advisorDef.getPropertyValues().add("order", element.getAttribute("order"));
+				}
+				parserContext.getRegistry().registerBeanDefinition(txAdvisorBeanName, advisorDef);
+
+				CompositeComponentDefinition compositeDef = new CompositeComponentDefinition(element.getTagName(), eleSource);
+				compositeDef.addNestedComponent(new BeanComponentDefinition(sourceDef, sourceName));
+				compositeDef.addNestedComponent(new BeanComponentDefinition(interceptorDef, interceptorName));
+				compositeDef.addNestedComponent(new BeanComponentDefinition(advisorDef, txAdvisorBeanName));
+				parserContext.registerComponent(compositeDef);
+			}
+		}
+	}
+}
+
+@Target({ElementType.METHOD, ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Inherited
+@Documented
+public @interface Transactional {
+    // 可选的限定描述符，指定使用的事务管理器
+    @AliasFor("transactionManager")
+    String value() default "";
+
+    @AliasFor("value")
+    String transactionManager() default "";
+
+    /**
+     * 该属性用于设置事务的传播行为：
+     * Propagation.REQUIRED：如果有事务, 那么加入事务, 没有的话新建一个(默认情况下)
+     * Propagation.NOT_SUPPORTED：容器不为这个方法开启事务
+     * Propagation.REQUIRES_NEW：不管是否存在事务,都创建一个新的事务,原来的挂起,新的执行完毕,继续执行老的事务
+     * Propagation.MANDATORY：必须在一个已有的事务中执行,否则抛出异常
+     * Propagation.NEVER：必须在一个没有的事务中执行,否则抛出异常(与Propagation.MANDATORY相反)
+     * Propagation.SUPPORTS：如果其他bean调用这个方法,在其他bean中声明事务,那就用事务.如果其他bean没有声明事务,那就不用事务.
+     */
+    Propagation propagation() default Propagation.REQUIRED;
+
+    // 该属性用于设置底层数据库的事务隔离级别，事务隔离级别用于处理多事务并发的情况，通常使用数据库的默认隔离级别即可
+    Isolation isolation() default Isolation.DEFAULT;
+
+    // 该属性用于设置事务的超时秒数，默认值为-1表示永不超时
+    int timeout() default -1;
+
+    // 该属性用于设置当前事务是否为只读事务，设置为true表示只读，false则表示可读写，默认值为false
+    boolean readOnly() default false;
+
+    // 该属性用于设置不需要进行回滚的异常类数组，当方法中抛出指定异常数组中的异常时，不进行事务回滚，可指定多个
+    Class<? extends Throwable>[] rollbackFor() default {};
+
+    // 该属性用于设置需要进行回滚的异常类名称数组，当方法中抛出指定异常名称数组中的异常时，则进行事务回滚，可指定多个
+    String[] rollbackForClassName() default {};
+
+    // 该属性用于设置需要进行回滚的异常类数组，当方法中抛出指定异常数组中的异常时，则进行事务回滚，可指定多个
+    Class<? extends Throwable>[] noRollbackFor() default {};
+
+    // 该属性用于设置不需要进行回滚的异常类名称数组，当方法中抛出指定异常名称数组中的异常时，不进行事务回滚，可指定多个
+    String[] noRollbackForClassName() default {};
+}
+

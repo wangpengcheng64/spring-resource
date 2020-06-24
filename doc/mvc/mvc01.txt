@@ -1,0 +1,217 @@
+SpringMVC五大核心组件：
+    DispatcherServlet：请求的入口
+　　HandlerMapping：请求的派发 负责让请求 和 控制器建立一一对应的关联
+　　Handler：Controller 真正的处理器
+　　ModelAndView：封装模型信息和视图信息的
+　　ViewResolver：视图处理器 最终定位页面的
+
+SpringMVC执行流程步骤：
+    ⑴ 用户发送请求至DispatcherServlet。
+    ⑵ DispatcherServlet收到请求调用HandlerMapping查询具体的Handler。
+    ⑶ 处理器映射器找到具体的处理器(可以根据xml配置、注解进行查找)，生成处理器对象及处理器拦截器(有则生成)一并返回给DispatcherServlet。
+    ⑷ DispatcherServlet接收到HandlerMapping返回的HandlerExecutorChain后，调用HandlerAdapter请求执行具体的Handler(Controller)。
+    ⑸ HandlerAdapter经过适配调用具体的Handler(Controller即后端控制器)。
+    ⑹ Controller执行完成返回ModelAndView(其中包含逻辑视图和数据)给HandlerAdaptor。
+    ⑺ HandlerAdaptor再将ModelAndView返回给DispatcherServlet。
+    ⑻ DispatcherServlet请求视图解析器ViewReslover解析ModelAndView。
+    ⑼ ViewReslover解析后返回具体View(物理视图)到DispatcherServlet。
+    ⑽ DispatcherServlet请求渲染视图(即将模型数据填充至视图中) 根据View进行渲染视图。
+    ⑾ 将渲染后的视图返回给DispatcherServlet。
+    ⑿ DispatcherServlet将响应结果返回给用户。
+
+public abstract class HttpServletBean extends HttpServlet implements EnvironmentCapable, EnvironmentAware {
+    @Override
+	public final void init() throws ServletException {
+		if (logger.isDebugEnabled()) {
+			logger.debug("Initializing servlet '" + getServletName() + "'");
+		}
+
+		// 对web.xml文件中的DispatcherServlet节点参数进行解析处理
+		PropertyValues pvs = new ServletConfigPropertyValues(getServletConfig(), this.requiredProperties);
+		if (!pvs.isEmpty()) {
+			try {
+			    // 将HttpServletBean类型转换为BeanWrapper类型，从而能对init-parameter的值进行注入
+				BeanWrapper bw = PropertyAccessorFactory.forBeanPropertyAccess(this);
+                // 注册自定义属性编辑器，遇到Resource类型的属性将会使用ResourceEditor进行解析
+				ResourceLoader resourceLoader = new ServletContextResourceLoader(getServletContext());
+				bw.registerCustomEditor(Resource.class, new ResourceEditor(resourceLoader, getEnvironment()));
+				// 留给子类实现
+				initBeanWrapper(bw);
+				// 设置DispatcherServlet的属性
+				bw.setPropertyValues(pvs, true);
+			}
+			catch (BeansException ex) {
+				if (logger.isErrorEnabled()) {
+					logger.error("Failed to set bean properties on servlet '" + getServletName() + "'", ex);
+				}
+				throw ex;
+			}
+		}
+		// 初始化工作，由子类FrameworkServlet实现
+		initServletBean();
+
+		if (logger.isDebugEnabled()) {
+			logger.debug("Servlet '" + getServletName() + "' configured successfully");
+		}
+	}
+}
+
+public abstract class FrameworkServlet extends HttpServletBean implements ApplicationContextAware {
+    @Override
+	protected final void initServletBean() throws ServletException {
+		getServletContext().log("Initializing Spring FrameworkServlet '" + getServletName() + "'");
+		if (this.logger.isInfoEnabled()) {
+			this.logger.info("FrameworkServlet '" + getServletName() + "': initialization started");
+		}
+		long startTime = System.currentTimeMillis();
+		try {
+		    // 初始化SpringMVC容器
+			this.webApplicationContext = initWebApplicationContext();
+			// 留给子类实现
+			initFrameworkServlet();
+		}
+		......
+	}
+	protected WebApplicationContext initWebApplicationContext() {
+	    // 获取Spring根容器
+        WebApplicationContext rootContext =
+                WebApplicationContextUtils.getWebApplicationContext(getServletContext());
+        WebApplicationContext wac = null;
+        // 判断在构造时是否注入了一个容器实例
+        if (this.webApplicationContext != null) {
+            wac = this.webApplicationContext;
+            if (wac instanceof ConfigurableWebApplicationContext) {
+                ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) wac;
+                // 是否处于活动状态
+                if (!cwac.isActive()) {
+                    if (cwac.getParent() == null) {
+                        // 将Spring根容器设置为父容器
+                        cwac.setParent(rootContext);
+                    }
+                    // 配置并刷新WebApplicationContext容器
+                    configureAndRefreshWebApplicationContext(cwac);
+                }
+            }
+        }
+        if (wac == null) {
+            // 通过配置名称到ServletContext中查找
+            wac = findWebApplicationContext();
+        }
+        if (wac == null) {
+            // 创建一个WebApplicationContext容器
+            wac = createWebApplicationContext(rootContext);
+        }
+        // 判断是否已调用DispatcherServlet的onRefresh()方法
+        if (!this.refreshEventReceived) {
+            onRefresh(wac);
+        }
+        // 将WebApplicationContext容器设置到ServletContext属性中
+        // ServletContext对象：全局唯一，而且工程内部的所有servlet都共享这个对象
+        if (this.publishContext) {
+            String attrName = getServletContextAttributeName();
+            getServletContext().setAttribute(attrName, wac);
+            if (this.logger.isDebugEnabled()) {
+                this.logger.debug("Published WebApplicationContext of servlet '" + getServletName() +
+                        "' as ServletContext attribute with name [" + attrName + "]");
+            }
+        }
+        return wac;
+    }
+    protected WebApplicationContext createWebApplicationContext(ApplicationContext parent) {
+		Class<?> contextClass = getContextClass();
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("Servlet with name '" + getServletName() +
+					"' will try to create custom WebApplicationContext context of class '" +
+					contextClass.getName() + "'" + ", using parent context [" + parent + "]");
+		}
+		if (!ConfigurableWebApplicationContext.class.isAssignableFrom(contextClass)) {
+			throw new ApplicationContextException(
+					"Fatal initialization error in servlet with name '" + getServletName() +
+					"': custom WebApplicationContext class [" + contextClass.getName() +
+					"] is not of type ConfigurableWebApplicationContext");
+		}
+		ConfigurableWebApplicationContext wac =
+				(ConfigurableWebApplicationContext) BeanUtils.instantiateClass(contextClass);
+
+		wac.setEnvironment(getEnvironment());
+		wac.setParent(parent);
+		wac.setConfigLocation(getContextConfigLocation());
+
+		configureAndRefreshWebApplicationContext(wac);
+
+		return wac;
+	}
+
+	protected void configureAndRefreshWebApplicationContext(ConfigurableWebApplicationContext wac) {
+		if (ObjectUtils.identityToString(wac).equals(wac.getId())) {
+			// The application context id is still set to its original default value
+			// -> assign a more useful id based on available information
+			if (this.contextId != null) {
+				wac.setId(this.contextId);
+			}
+			else {
+				// Generate default id...
+				wac.setId(ConfigurableWebApplicationContext.APPLICATION_CONTEXT_ID_PREFIX +
+						ObjectUtils.getDisplayString(getServletContext().getContextPath()) + '/' + getServletName());
+			}
+		}
+
+		wac.setServletContext(getServletContext());
+		wac.setServletConfig(getServletConfig());
+		wac.setNamespace(getNamespace());
+		wac.addApplicationListener(new SourceFilteringListener(wac, new ContextRefreshListener()));
+
+		// The wac environment's #initPropertySources will be called in any case when the context
+		// is refreshed; do it eagerly here to ensure servlet property sources are in place for
+		// use in any post-processing or initialization that occurs below prior to #refresh
+		ConfigurableEnvironment env = wac.getEnvironment();
+		if (env instanceof ConfigurableWebEnvironment) {
+			((ConfigurableWebEnvironment) env).initPropertySources(getServletContext(), getServletConfig());
+		}
+
+		postProcessWebApplicationContext(wac);
+		applyInitializers(wac);
+		wac.refresh();
+	}
+}
+
+DispatcherServlet是对Servlet类的包装，通过url映射获取SpringMvc中定义得请求方法
+其实在完成BeanFactory的初始化创建工作(IOC容器就创建完成)，发布事件时会执行DispatcherServlet的onRefresh()方法
+public class DispatcherServlet extends FrameworkServlet {
+	@Override
+	protected void onRefresh(ApplicationContext context) {
+	    // 初始化这个servlet使用的策略对象
+		initStrategies(context);
+	}
+	protected void initStrategies(ApplicationContext context) {
+        initMultipartResolver(context); // 初始化上传文件解析器
+
+        initLocaleResolver(context); // 初始化本地化解析器
+
+        initThemeResolver(context); // 初始化主题解析器
+
+        initHandlerMappings(context); // 初始化处理器映射器
+
+        initHandlerAdapters(context); // 初始化处理器适配器
+
+        initHandlerExceptionResolvers(context); // 初始化处理器异常解析器
+
+        initRequestToViewNameTranslator(context); // 初始化请求到视图名翻译器
+
+        initViewResolvers(context); // 初始化视图解析器
+
+        initFlashMapManager(context); // 初始化重定向数据管理器
+    }
+    HttpServlet.doGet() -> FrameworkServlet.doGet() -> FrameworkServlet.processRequest() -> DispatcherServlet.doService()
+
+
+}
+
+ApplicationObjectSupport
+
+
+
+
+
+
+

@@ -1,0 +1,271 @@
+Spring容器初始化--Bean的实例化过程(一)
+public abstract class AbstractApplicationContext extends DefaultResourceLoader
+		implements ConfigurableApplicationContext, DisposableBean {
+    public void refresh() throws BeansException, IllegalStateException {
+        ...
+        // 初始化剩下的所有单实例bean（lazy-init的除外）
+        finishBeanFactoryInitialization(beanFactory);
+        ...
+    }
+    protected void finishBeanFactoryInitialization(ConfigurableListableBeanFactory beanFactory) {
+        // 是否有conversionService对象，没有就创建
+        if (beanFactory.containsBean(CONVERSION_SERVICE_BEAN_NAME) &&
+                beanFactory.isTypeMatch(CONVERSION_SERVICE_BEAN_NAME, ConversionService.class)) {
+            beanFactory.setConversionService(
+                    beanFactory.getBean(CONVERSION_SERVICE_BEAN_NAME, ConversionService.class));
+        }
+        // BeanFactory是否有嵌入值解析器，没有则注册默认的嵌入值解析器（主要用于注解属性值的解析）
+        if (!beanFactory.hasEmbeddedValueResolver()) {
+            beanFactory.addEmbeddedValueResolver(new StringValueResolver() {
+                @Override
+                public String resolveStringValue(String strVal) {
+                    return getEnvironment().resolvePlaceholders(strVal);
+                }
+            });
+        }
+        // 初始化LoadTimeWeaverAware对象，以便尽早创建其转换器
+        String[] weaverAwareNames = beanFactory.getBeanNamesForType(LoadTimeWeaverAware.class, false, false);
+        for (String weaverAwareName : weaverAwareNames) {
+            getBean(weaverAwareName);
+        }
+        // 停止使用临时的ClassLoader进行类型匹配
+        beanFactory.setTempClassLoader(null);
+        // 允许缓存所有bean定义元数据，而不做进一步的更改
+        beanFactory.freezeConfiguration();
+        // 初始化剩下的所有单实例bean（lazy-init的除外）
+        beanFactory.preInstantiateSingletons();
+    }
+}
+public class DefaultListableBeanFactory extends AbstractAutowireCapableBeanFactory
+		implements ConfigurableListableBeanFactory, BeanDefinitionRegistry, Serializable {
+    @Override
+	public void preInstantiateSingletons() throws BeansException {
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("Pre-instantiating singletons in " + this);
+		}
+		// 获取所有的bean定义信息，创建副本遍历初始化bean
+		List<String> beanNames = new ArrayList<String>(this.beanDefinitionNames);
+		// 遍历所有的bean，初始化所有非懒加载bean
+		for (String beanName : beanNames) {
+		    // 获取bean定义信息
+			RootBeanDefinition bd = getMergedLocalBeanDefinition(beanName);
+			// 非抽象，单实例，非懒加载
+			if (!bd.isAbstract() && bd.isSingleton() && !bd.isLazyInit()) {
+			    // 是否是FactoryBean类型
+				if (isFactoryBean(beanName)) {
+				    // 如果是，则获取FactoryBean对象
+				    // beanName前面加上&符号，获取的是FactoryBean对象本身，否则获取的是通过FactoryBean创建的Bean实例
+					final FactoryBean<?> factory = (FactoryBean<?>) getBean(FACTORY_BEAN_PREFIX + beanName);
+					// 判断bean是否急于初始化，前提是实现了SmartFactoryBean接口
+					boolean isEagerInit;
+					// System.getSecurityManager()：当运行未知的Java程序的时候，该程序可能有恶意代码（删除系统文件、重启系统等）
+					// 为了防止运行恶意代码对系统产生影响，需要对运行的代码的权限进行控制，这时候就要启用Java安全管理器。
+					if (System.getSecurityManager() != null && factory instanceof SmartFactoryBean) {
+						isEagerInit = AccessController.doPrivileged(new PrivilegedAction<Boolean>() {
+							@Override
+							public Boolean run() {
+								return ((SmartFactoryBean<?>) factory).isEagerInit();
+							}
+						}, getAccessControlContext());
+					}
+					else {
+						isEagerInit = (factory instanceof SmartFactoryBean &&
+								((SmartFactoryBean<?>) factory).isEagerInit());
+					}
+					if (isEagerInit) { // 如果bean是急于初始化，则通过beanName获取实例
+						getBean(beanName);
+					}
+				}
+				else { // 不是FactoryBean类型，则通过beanName获取实例
+					getBean(beanName);
+				}
+			}
+		}
+		// 遍历所有的bean，触发SmartInitializingSingleton类型bean的afterSingletonsInstantiated()方法
+		for (String beanName : beanNames) {
+		    // 从单实例缓存容器中获取实例
+			Object singletonInstance = getSingleton(beanName);
+			// 是否属于SmartInitializingSingleton类型
+			if (singletonInstance instanceof SmartInitializingSingleton) {
+				final SmartInitializingSingleton smartSingleton = (SmartInitializingSingleton) singletonInstance;
+				// 是否启用Java安全管理器
+				if (System.getSecurityManager() != null) {
+					AccessController.doPrivileged(new PrivilegedAction<Object>() {
+						@Override
+						public Object run() {
+							smartSingleton.afterSingletonsInstantiated();
+							return null;
+						}
+					}, getAccessControlContext());
+				}
+				else {
+				    // 执行afterSingletonsInstantiated()方法
+					smartSingleton.afterSingletonsInstantiated();
+				}
+			}
+		}
+	}
+}
+public abstract class AbstractBeanFactory extends FactoryBeanRegistrySupport implements ConfigurableBeanFactory {
+	protected RootBeanDefinition getMergedLocalBeanDefinition(String beanName) throws BeansException {
+		// 首先从缓存容器中获取，如果不为null则返回
+		RootBeanDefinition mbd = this.mergedBeanDefinitions.get(beanName);
+		if (mbd != null) {
+			return mbd;
+		}
+		// 获取合并的bean定义信息（有父子容器的情况）
+		return getMergedBeanDefinition(beanName, getBeanDefinition(beanName));
+	}
+    protected RootBeanDefinition getMergedBeanDefinition(String beanName, BeanDefinition bd)
+            throws BeanDefinitionStoreException {
+        // 往下走
+        return getMergedBeanDefinition(beanName, bd, null);
+    }
+    protected RootBeanDefinition getMergedBeanDefinition(
+			String beanName, BeanDefinition bd, BeanDefinition containingBd)
+			throws BeanDefinitionStoreException {
+		synchronized (this.mergedBeanDefinitions) {
+			RootBeanDefinition mbd = null;
+			// 检查缓存容器mergedBeanDefinitions中是否存在
+			if (containingBd == null) {
+				mbd = this.mergedBeanDefinitions.get(beanName);
+			}
+            // 如果缓存容器中没有
+			if (mbd == null) {
+			    // 是否有父容器
+				if (bd.getParentName() == null) {
+					// 如果bd属于RootBeanDefinition类型，则克隆赋值
+					if (bd instanceof RootBeanDefinition) {
+						mbd = ((RootBeanDefinition) bd).cloneBeanDefinition();
+					}
+					else { // 作为参数，构建一个新的RootBeanDefinition对象（深度拷贝）
+						mbd = new RootBeanDefinition(bd);
+					}
+				}
+				else {
+					BeanDefinition pbd;
+					try {
+						String parentBeanName = transformedBeanName(bd.getParentName());
+						// 如果父容器还有父容器，则递归合并
+						if (!beanName.equals(parentBeanName)) {
+							pbd = getMergedBeanDefinition(parentBeanName);
+						}
+						else {
+						    // 获取父容器信息
+							BeanFactory parent = getParentBeanFactory();
+							if (parent instanceof ConfigurableBeanFactory) {
+								pbd = ((ConfigurableBeanFactory) parent).getMergedBeanDefinition(parentBeanName);
+							}
+							else {
+								throw new NoSuchBeanDefinitionException(parentBeanName,
+										"Parent name '" + parentBeanName + "' is equal to bean name '" + beanName +
+										"': cannot be resolved without an AbstractBeanFactory parent");
+							}
+						}
+					}
+					catch (NoSuchBeanDefinitionException ex) {
+						throw new BeanDefinitionStoreException(bd.getResourceDescription(), beanName,
+								"Could not resolve parent bean definition '" + bd.getParentName() + "'", ex);
+					}
+					// 作为参数，构建一个新的RootBeanDefinition对象（深度拷贝）
+					mbd = new RootBeanDefinition(pbd);
+					// 覆盖父容器定义信息
+					mbd.overrideFrom(bd);
+				}
+				// 如果没有设置scope属性，则设置默认为singleton
+				if (!StringUtils.hasLength(mbd.getScope())) {
+					mbd.setScope(RootBeanDefinition.SCOPE_SINGLETON);
+				}
+				// 判断后设置scope属性
+				if (containingBd != null && !containingBd.isSingleton() && mbd.isSingleton()) {
+					mbd.setScope(containingBd.getScope());
+				}
+				// 将beanName对应的定义信息存到缓存容器中，下次需要直接获取
+				if (containingBd == null && isCacheBeanMetadata()) {
+					this.mergedBeanDefinitions.put(beanName, mbd);
+				}
+			}
+			return mbd;
+		}
+	}
+    @Override
+	public boolean isFactoryBean(String name) throws NoSuchBeanDefinitionException {
+	    // 获取真实bean名称，去除"&"前缀，并且解析别名
+		String beanName = transformedBeanName(name);
+        // 从缓存中获取bean单实例对象
+		Object beanInstance = getSingleton(beanName, false);
+		if (beanInstance != null) {
+		    // bean实例对象不为空，返回该对象是否为FactoryBean类型
+			return (beanInstance instanceof FactoryBean);
+		}
+		else if (containsSingleton(beanName)) {
+			// 缓存对象map中存在key（beanName），但对应的value（beanInstance）为空，则返回false
+			return false;
+		}
+		// 缓存中不存在bean的定义信息 && 父工厂ParentBeanFactory属于ConfigurableBeanFactory类型
+		if (!containsBeanDefinition(beanName) && getParentBeanFactory() instanceof ConfigurableBeanFactory) {
+			// 调用父工厂的isFactoryBean()方法
+			return ((ConfigurableBeanFactory) getParentBeanFactory()).isFactoryBean(name);
+		}
+        // 通过beanName及bean定义信息继续判断
+		return isFactoryBean(beanName, getMergedLocalBeanDefinition(beanName));
+	}
+    protected boolean isFactoryBean(String beanName, RootBeanDefinition mbd) {
+        // 获取bean的类型
+        Class<?> beanType = predictBeanType(beanName, mbd, FactoryBean.class);
+        // 判断bean是否属于FactoryBean类型
+        return (beanType != null && FactoryBean.class.isAssignableFrom(beanType));
+    }
+}
+public class DefaultSingletonBeanRegistry extends SimpleAliasRegistry implements SingletonBeanRegistry {
+	protected Object getSingleton(String beanName, boolean allowEarlyReference) {
+	    // 从缓存中获取bean单实例对象
+		Object singletonObject = this.singletonObjects.get(beanName);
+		// bean单实例对象为空 && bean单实例对象正在创建中
+		if (singletonObject == null && isSingletonCurrentlyInCreation(beanName)) {
+			synchronized (this.singletonObjects) {
+			    // 从早期单实例对象容器中获取
+				singletonObject = this.earlySingletonObjects.get(beanName);
+				// bean单实例对象为空 && 允许创建早期对象引用
+				if (singletonObject == null && allowEarlyReference) {
+				    // 从单例工厂容器中获取beanName对应的单例工厂对象
+					ObjectFactory<?> singletonFactory = this.singletonFactories.get(beanName);
+					if (singletonFactory != null) {
+					    // 通过单例工厂对象创建bean单例对象，并且以beanName为key存放到早期单例对象容器中
+						singletonObject = singletonFactory.getObject();
+						this.earlySingletonObjects.put(beanName, singletonObject);
+						// 已经创建了对象并保存，后期不需要再创建，故移除beanName对应的单例工厂对象
+						this.singletonFactories.remove(beanName);
+					}
+				}
+			}
+		}
+		// 返回bean单实例对象
+		return (singletonObject != NULL_OBJECT ? singletonObject : null);
+	}
+}
+public abstract class AbstractAutowireCapableBeanFactory extends AbstractBeanFactory
+		implements AutowireCapableBeanFactory {
+	protected Class<?> predictBeanType(String beanName, RootBeanDefinition mbd, Class<?>... typesToMatch) {
+	    // 获取bean的类型
+		Class<?> targetType = determineTargetType(beanName, mbd, typesToMatch);
+
+		// targetType不为空 && bean定义信息不是合成的 && 注册了InstantiationAwareBeanPostProcessor组件
+		if (targetType != null && !mbd.isSynthetic() && hasInstantiationAwareBeanPostProcessors()) {
+			for (BeanPostProcessor bp : getBeanPostProcessors()) {
+			    // 判断InstantiationAwareBeanPostProcessor组件
+				if (bp instanceof SmartInstantiationAwareBeanPostProcessor) {
+					SmartInstantiationAwareBeanPostProcessor ibp = (SmartInstantiationAwareBeanPostProcessor) bp;
+					// 调用InstantiationAwareBeanPostProcessor的predictBeanType()方法获取bean类型
+					Class<?> predicted = ibp.predictBeanType(targetType, beanName);
+                    // predicted不为空 && （typesToMatch长度不等于1 || typesToMatch[0] 不是FactoryBean || predicted属于FactoryBean类型）
+					if (predicted != null && (typesToMatch.length != 1 || FactoryBean.class != typesToMatch[0] ||
+							FactoryBean.class.isAssignableFrom(predicted))) {
+						return predicted;
+					}
+				}
+			}
+		}
+		return targetType;
+	}
+}

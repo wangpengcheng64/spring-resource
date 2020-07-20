@@ -1,4 +1,7 @@
-spring tx事务源码解析
+spring tx事务源码解析--事务入口
+Spring事务管理的两种方式:
+    编程式事务：使用TransactionTemplate或者直接使用底层的PlatformTransactionManager。对于编程式事务管理，spring推荐使用TransactionTemplate。
+    声明式事务：建立在AOP之上的。其本质是对方法前后进行拦截，然后在目标方法开始之前创建或者加入一个事务，在执行完目标方法之后根据执行情况提交或者回滚事务。
 事务四要素：
     原子性(Atomicity)：即事务是不可分割的最小工作单元，事务内的操作要么全做，要么全不做，不能只做一部分；
     一致性(Consistency)：在事务执行前数据库的数据处于正确的状态，而事务执行完成后数据库的数据还是处于正确的状态，即数据完整性约束没有被破坏；
@@ -17,7 +20,6 @@ spring tx事务源码解析
 　　MYSQL：默认为REPEATABLE_READ级别
 　　ORACLE：默认为READ_COMMITTED级别
 
--------------------------tx事务入口-------------------------
 查看《Spring容器初始化--创建BeanFactory及加载Bean定义信息(三)》可以了解到<tx>标签解析过程
 首先通过命名空间可以在类路径下的spring.handlers中找到对应的处理器，在spring.schemas中找到对应的xsd文件
 获取到注解对应的处理器：http\://www.springframework.org/schema/aop=org.springframework.aop.config.TxNamespaceHandler
@@ -41,13 +43,13 @@ public class TxNamespaceHandler extends NamespaceHandlerSupport {
 }
 <tx:annotation-driven />标签对应的解析器是：AnnotationDrivenBeanDefinitionParser，并且执行其parse()方法
 class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
-
 	@Override
 	public BeanDefinition parse(Element element, ParserContext parserContext) {
+	    // 注入事务事件监听组件，用于处理@TransactionalEventListener注解
 		registerTransactionalEventListenerFactory(parserContext);
 		// 获取mode属性值
 		String mode = element.getAttribute("mode");
-		// 是否使用 Aspect 方式实现代理，默认方式为 JDK 的动态代理
+		// 是否使用 Aspect 方式实现代理，默认方式为JDK的动态代理
 		if ("aspectj".equals(mode)) {
 			// mode="aspectj"
 			registerTransactionAspect(element, parserContext);
@@ -58,7 +60,6 @@ class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
 		}
 		return null;
 	}
-
 	private void registerTransactionAspect(Element element, ParserContext parserContext) {
 	    // org.springframework.transaction.config.internalTransactionAspect
 		String txAspectBeanName = TransactionManagementConfigUtils.TRANSACTION_ASPECT_BEAN_NAME;
@@ -71,43 +72,40 @@ class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
 			def.setFactoryMethodName("aspectOf");
 			// 向bean定义中注册事务管理器（transactionManagerBeanName属性赋值）
 			registerTransactionManager(element, def);
-			// 向容器中注册组件AnnotationTransactionAspect
+			// 向容器中注册AnnotationTransactionAspect组件
 			parserContext.registerBeanComponent(new BeanComponentDefinition(def, txAspectBeanName));
 		}
 	}
-
 	private static void registerTransactionManager(Element element, BeanDefinition def) {
 	    // bean定义属性列表中添加transactionManagerBeanName属性
 		def.getPropertyValues().add("transactionManagerBeanName",
 				TxNamespaceHandler.getTransactionManagerName(element));
 	}
-
 	private void registerTransactionalEventListenerFactory(ParserContext parserContext) {
 		RootBeanDefinition def = new RootBeanDefinition();
 		def.setBeanClass(TransactionalEventListenerFactory.class);
+		// 根据beanName和bean定义创建TransactionalEventListenerFactory组件
 		parserContext.registerBeanComponent(new BeanComponentDefinition(def,
 				TransactionManagementConfigUtils.TRANSACTIONAL_EVENT_LISTENER_FACTORY_BEAN_NAME));
 	}
-
-
 	// 内部类，在实际处于代理模式时引入AOP框架依赖关系
 	private static class AopAutoProxyConfigurer {
 		public static void configureAutoProxyCreator(Element element, ParserContext parserContext) {
 		    // 注册自动代理创建器InfrastructureAdvisorAutoProxyCreator
 			AopNamespaceUtils.registerAutoProxyCreatorIfNecessary(parserContext, element);
-
+            // 需要注册的事务Advisor名称
 			String txAdvisorBeanName = TransactionManagementConfigUtils.TRANSACTION_ADVISOR_BEAN_NAME;
 			if (!parserContext.getRegistry().containsBeanDefinition(txAdvisorBeanName)) {
 				Object eleSource = parserContext.extractSource(element);
 
-				// Create the TransactionAttributeSource definition.
+				// 注册AnnotationTransactionAttributeSource组件，解析事务注解(@Transactional)属性
 				RootBeanDefinition sourceDef = new RootBeanDefinition(
 						"org.springframework.transaction.annotation.AnnotationTransactionAttributeSource");
 				sourceDef.setSource(eleSource);
 				sourceDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);
 				String sourceName = parserContext.getReaderContext().registerWithGeneratedName(sourceDef);
 
-				// Create the TransactionInterceptor definition.
+				// 注册TransactionInterceptor组件，事务拦截器
 				RootBeanDefinition interceptorDef = new RootBeanDefinition(TransactionInterceptor.class);
 				interceptorDef.setSource(eleSource);
 				interceptorDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);
@@ -115,7 +113,7 @@ class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
 				interceptorDef.getPropertyValues().add("transactionAttributeSource", new RuntimeBeanReference(sourceName));
 				String interceptorName = parserContext.getReaderContext().registerWithGeneratedName(interceptorDef);
 
-				// Create the TransactionAttributeSourceAdvisor definition.
+				// 注册BeanFactoryTransactionAttributeSourceAdvisor组件，对事务方法进行增强
 				RootBeanDefinition advisorDef = new RootBeanDefinition(BeanFactoryTransactionAttributeSourceAdvisor.class);
 				advisorDef.setSource(eleSource);
 				advisorDef.setRole(BeanDefinition.ROLE_INFRASTRUCTURE);
@@ -136,48 +134,125 @@ class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
 	}
 }
 
-@Target({ElementType.METHOD, ElementType.TYPE})
-@Retention(RetentionPolicy.RUNTIME)
-@Inherited
-@Documented
-public @interface Transactional {
-    // 可选的限定描述符，指定使用的事务管理器
-    @AliasFor("transactionManager")
-    String value() default "";
+-------------------------tx事务执行-------------------------
+// 方法拦截器MethodInterceptor，执行代理类的目标方法，会触发invoke方法执行
+public class TransactionInterceptor extends TransactionAspectSupport implements MethodInterceptor, Serializable {
+	@Override
+	public Object invoke(final MethodInvocation invocation) throws Throwable {
+		// 获取目标类Class类型
+		Class<?> targetClass = (invocation.getThis() != null ? AopUtils.getTargetClass(invocation.getThis()) : null);
 
-    @AliasFor("value")
-    String transactionManager() default "";
-
-    /**
-     * 该属性用于设置事务的传播行为：
-     * Propagation.REQUIRED：如果有事务, 那么加入事务, 没有的话新建一个(默认情况下)
-     * Propagation.NOT_SUPPORTED：容器不为这个方法开启事务
-     * Propagation.REQUIRES_NEW：不管是否存在事务,都创建一个新的事务,原来的挂起,新的执行完毕,继续执行老的事务
-     * Propagation.MANDATORY：必须在一个已有的事务中执行,否则抛出异常
-     * Propagation.NEVER：必须在一个没有的事务中执行,否则抛出异常(与Propagation.MANDATORY相反)
-     * Propagation.SUPPORTS：如果其他bean调用这个方法,在其他bean中声明事务,那就用事务.如果其他bean没有声明事务,那就不用事务.
-     */
-    Propagation propagation() default Propagation.REQUIRED;
-
-    // 该属性用于设置底层数据库的事务隔离级别，事务隔离级别用于处理多事务并发的情况，通常使用数据库的默认隔离级别即可
-    Isolation isolation() default Isolation.DEFAULT;
-
-    // 该属性用于设置事务的超时秒数，默认值为-1表示永不超时
-    int timeout() default -1;
-
-    // 该属性用于设置当前事务是否为只读事务，设置为true表示只读，false则表示可读写，默认值为false
-    boolean readOnly() default false;
-
-    // 该属性用于设置不需要进行回滚的异常类数组，当方法中抛出指定异常数组中的异常时，不进行事务回滚，可指定多个
-    Class<? extends Throwable>[] rollbackFor() default {};
-
-    // 该属性用于设置需要进行回滚的异常类名称数组，当方法中抛出指定异常名称数组中的异常时，则进行事务回滚，可指定多个
-    String[] rollbackForClassName() default {};
-
-    // 该属性用于设置需要进行回滚的异常类数组，当方法中抛出指定异常数组中的异常时，则进行事务回滚，可指定多个
-    Class<? extends Throwable>[] noRollbackFor() default {};
-
-    // 该属性用于设置不需要进行回滚的异常类名称数组，当方法中抛出指定异常名称数组中的异常时，不进行事务回滚，可指定多个
-    String[] noRollbackForClassName() default {};
+		// 执行父类TransactionAspectSupport的模板方法
+		return invokeWithinTransaction(invocation.getMethod(), targetClass, new InvocationCallback() {
+			@Override
+			public Object proceedWithInvocation() throws Throwable {
+			    // 执行拦截器链及目标方法
+				return invocation.proceed();
+			}
+		});
+	}
 }
-
+public abstract class TransactionAspectSupport implements BeanFactoryAware, InitializingBean {
+    protected Object invokeWithinTransaction(Method method, Class<?> targetClass, final InvocationCallback invocation)
+			throws Throwable {
+		// 获取事务属性，如果事务属性为null(即未使用@Transactional注解)，则该方法是非事务性的
+		final TransactionAttribute txAttr = getTransactionAttributeSource().getTransactionAttribute(method, targetClass);
+		// 获取事务管理器DataSourceTransactionManager
+		final PlatformTransactionManager tm = determineTransactionManager(txAttr);
+		// 获取目标方法唯一标识
+		final String joinpointIdentification = methodIdentification(method, targetClass, txAttr);
+        // 声明式事务：事务属性 == null || 不属于CallbackPreferringPlatformTransactionManager类型(编程式事务)
+		if (txAttr == null || !(tm instanceof CallbackPreferringPlatformTransactionManager)) {
+			// 如果需要，则创建事务信息，并开启事务
+			TransactionInfo txInfo = createTransactionIfNecessary(tm, txAttr, joinpointIdentification);
+			Object retVal = null;
+			try {
+				// 执行目标方法
+				retVal = invocation.proceedWithInvocation();
+			}
+			catch (Throwable ex) {
+				// 目标调用异常时事务处理
+				completeTransactionAfterThrowing(txInfo, ex);
+				throw ex;
+			}
+			finally {
+			    // 异常或正常执行后，清除当前事务的信息
+				cleanupTransactionInfo(txInfo);
+			}
+			// 返回前提交事务
+			commitTransactionAfterReturning(txInfo);
+			return retVal;
+		}
+		else { // 编程式事务：（回调偏向）
+			final ThrowableHolder throwableHolder = new ThrowableHolder();
+			try {
+				Object result = ((CallbackPreferringPlatformTransactionManager) tm).execute(txAttr,
+						new TransactionCallback<Object>() {
+							@Override
+							public Object doInTransaction(TransactionStatus status) {
+							    // 获取事务的信息
+								TransactionInfo txInfo = prepareTransactionInfo(tm, txAttr, joinpointIdentification, status);
+								try {
+								    // 执行目标方法
+									return invocation.proceedWithInvocation();
+								}
+								catch (Throwable ex) {
+								    // 事务是否需要回滚（默认：ex是否属于RuntimeException或Error类型）
+									if (txAttr.rollbackOn(ex)) {
+										if (ex instanceof RuntimeException) {
+											throw (RuntimeException) ex;
+										}
+										else {
+											throw new ThrowableHolderException(ex);
+										}
+									}
+									else {
+										// A normal return value: will lead to a commit.
+										throwableHolder.throwable = ex;
+										return null;
+									}
+								}
+								finally {
+								    // 清除当前事务的信息
+									cleanupTransactionInfo(txInfo);
+								}
+							}
+						});
+				// 向上抛出异常
+				if (throwableHolder.throwable != null) {
+					throw throwableHolder.throwable;
+				}
+				return result;
+			}
+		    ......
+		}
+	}
+	protected void completeTransactionAfterThrowing(TransactionInfo txInfo, Throwable ex) {
+        if (txInfo != null && txInfo.hasTransaction()) {
+            // 事务是否需要回滚（默认：ex是否属于RuntimeException或Error类型）
+            if (txInfo.transactionAttribute.rollbackOn(ex)) {
+                try {
+                    // 事务回滚
+                    txInfo.getTransactionManager().rollback(txInfo.getTransactionStatus());
+                }
+                ......
+            }
+            else {
+                try {
+                    // 如果异常不处理，则获取事务管理器，提交事务
+                    txInfo.getTransactionManager().commit(txInfo.getTransactionStatus());
+                }
+                ......
+            }
+        }
+    }
+    protected void commitTransactionAfterReturning(TransactionInfo txInfo) {
+        if (txInfo != null && txInfo.hasTransaction()) {
+            if (logger.isTraceEnabled()) {
+                logger.trace("Completing transaction for [" + txInfo.getJoinpointIdentification() + "]");
+            }
+            // 获取事务管理器，提交事务
+            txInfo.getTransactionManager().commit(txInfo.getTransactionStatus());
+        }
+    }
+}

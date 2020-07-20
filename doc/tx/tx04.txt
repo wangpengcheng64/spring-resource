@@ -1,0 +1,251 @@
+spring tx事务源码解析--事务提交/回滚
+public abstract class AbstractPlatformTransactionManager implements PlatformTransactionManager, Serializable {
+	public final void commit(TransactionStatus status) throws TransactionException {
+        // 如果事务已经提交，抛异常提示不要重复提交操作
+		if (status.isCompleted()) {
+			throw new IllegalTransactionStateException(
+					"Transaction is already completed - do not call commit or rollback more than once per transaction");
+		}
+        // 该事务被标记为回滚状态
+		DefaultTransactionStatus defStatus = (DefaultTransactionStatus) status;
+		if (defStatus.isLocalRollbackOnly()) {
+			if (defStatus.isDebug()) {
+				logger.debug("Transactional code has requested rollback");
+			}
+			// 事务回滚
+			processRollback(defStatus);
+			return;
+		}
+		// 不需要全局回滚 && 当前状态为全局回滚
+		if (!shouldCommitOnGlobalRollbackOnly() && defStatus.isGlobalRollbackOnly()) {
+			if (defStatus.isDebug()) {
+				logger.debug("Global transaction is marked as rollback-only but transactional code requested commit");
+			}
+			processRollback(defStatus);
+			// 当前事务是否为新事务 || 显式要求抛出
+			if (status.isNewTransaction() || isFailEarlyOnGlobalRollbackOnly()) {
+				throw new UnexpectedRollbackException(
+						"Transaction rolled back because it has been marked as rollback-only");
+			}
+			return;
+		}
+        // 事务提交
+		processCommit(defStatus);
+	}
+	// 事务提交
+    private void processCommit(DefaultTransactionStatus status) throws TransactionException {
+		try {
+			boolean beforeCompletionInvoked = false;
+			try {
+			    // 提交前准备/提交前触发/完成前触发
+				prepareForCommit(status);
+				triggerBeforeCommit(status);
+				triggerBeforeCompletion(status);
+				beforeCompletionInvoked = true;
+				// 全局回滚
+				boolean globalRollbackOnly = false;
+				// 当前事务是否为新事务 || 显式要求抛出
+				if (status.isNewTransaction() || isFailEarlyOnGlobalRollbackOnly()) {
+					globalRollbackOnly = status.isGlobalRollbackOnly();
+				}
+				// 是否设置保存点（嵌套事务）
+				if (status.hasSavepoint()) {
+					if (status.isDebug()) {
+						logger.debug("Releasing transaction savepoint");
+					}
+					// 不提交，释放保存点
+					status.releaseHeldSavepoint();
+				} // 当前事务是否为新事务
+				else if (status.isNewTransaction()) {
+					if (status.isDebug()) {
+						logger.debug("Initiating transaction commit");
+					}
+					// 子类实现，获取连接对象Connection，执行提交
+					doCommit(status);
+				}
+				if (globalRollbackOnly) {
+					throw new UnexpectedRollbackException(
+							"Transaction silently rolled back because it has been marked as rollback-only");
+				}
+			}
+            ......
+            // Trigger afterCommit callbacks, with an exception thrown there
+            // propagated to callers but the transaction still considered as committed.
+            try {
+                // 事务提交后触发操作
+                triggerAfterCommit(status);
+            }
+            finally {
+                // 事务完成后触发操作
+                triggerAfterCompletion(status, TransactionSynchronization.STATUS_COMMITTED);
+            }
+		}
+		finally {
+		    // 事务完成后，清空记录的资源并将挂起的资源恢复
+			cleanupAfterCompletion(status);
+		}
+	}
+    // 事务回滚
+	public final void rollback(TransactionStatus status) throws TransactionException {
+	    // 如果事务已经提交，抛异常提示不要重复回滚操作
+		if (status.isCompleted()) {
+			throw new IllegalTransactionStateException(
+					"Transaction is already completed - do not call commit or rollback more than once per transaction");
+		}
+
+		DefaultTransactionStatus defStatus = (DefaultTransactionStatus) status;
+		processRollback(defStatus);
+	}
+    // 事务回滚
+	private void processRollback(DefaultTransactionStatus status) {
+		try {
+			try {
+			    // 事务完成前执行资源清理
+				triggerBeforeCompletion(status);
+				// 是否设置保存点（嵌套事务）
+				if (status.hasSavepoint()) {
+					if (status.isDebug()) {
+						logger.debug("Rolling back transaction to savepoint");
+					}
+					// 回滚到保存点
+					status.rollbackToHeldSavepoint();
+				}
+				// 是否新的事务（REQUIRES_NEW会进入到这里进行回滚）
+				else if (status.isNewTransaction()) {
+					if (status.isDebug()) {
+						logger.debug("Initiating transaction rollback");
+					}
+					// 子类实现，获取连接对象Connection，执行回滚
+					doRollback(status);
+				}
+				// 是否存在事务
+				else if (status.hasTransaction()) {
+				    // 已经标记为回滚 || 加入事务失败时全局回滚（默认true）
+					if (status.isLocalRollbackOnly() || isGlobalRollbackOnParticipationFailure()) {
+						if (status.isDebug()) {
+							logger.debug("Participating transaction failed - marking existing transaction as rollback-only");
+						}
+						// 子类实现，将事务标记为回滚
+						doSetRollbackOnly(status);
+					}
+					else {
+						if (status.isDebug()) {
+							logger.debug("Participating transaction failed - letting transaction originator decide on rollback");
+						}
+					}
+				}
+				else {
+					logger.debug("Should roll back transaction but cannot - no transaction available");
+				}
+			}
+			// 事务完成后执行资源清理
+			triggerAfterCompletion(status, TransactionSynchronization.STATUS_ROLLED_BACK);
+		}
+		finally {
+		    // 解绑当前线程，释放链接资源，在内部事务完成后恢复挂起的事务
+			cleanupAfterCompletion(status);
+		}
+	}
+}
+public class DataSourceTransactionManager extends AbstractPlatformTransactionManager
+		implements ResourceTransactionManager, InitializingBean {
+	// 事务挂起
+	protected Object doSuspend(Object transaction) {
+		DataSourceTransactionObject txObject = (DataSourceTransactionObject) transaction;
+		// 清空当前JDBC连接
+		txObject.setConnectionHolder(null);
+		// 解绑数据源dataSource
+		return TransactionSynchronizationManager.unbindResource(this.dataSource);
+	}
+    // 事务恢复
+	protected void doResume(Object transaction, Object suspendedResources) {
+	    // 绑定数据源dataSource
+		TransactionSynchronizationManager.bindResource(this.dataSource, suspendedResources);
+	}
+    // 事务提交
+	protected void doCommit(DefaultTransactionStatus status) {
+		DataSourceTransactionObject txObject = (DataSourceTransactionObject) status.getTransaction();
+		// 获取连接对象，执行提交commit方法
+		Connection con = txObject.getConnectionHolder().getConnection();
+		if (status.isDebug()) {
+			logger.debug("Committing JDBC transaction on Connection [" + con + "]");
+		}
+		try {
+			con.commit();
+		}
+		catch (SQLException ex) {
+			throw new TransactionSystemException("Could not commit JDBC transaction", ex);
+		}
+	}
+    // 事务回滚
+	protected void doRollback(DefaultTransactionStatus status) {
+		DataSourceTransactionObject txObject = (DataSourceTransactionObject) status.getTransaction();
+		// 获取连接对象，执行提交rollback方法
+		Connection con = txObject.getConnectionHolder().getConnection();
+		if (status.isDebug()) {
+			logger.debug("Rolling back JDBC transaction on Connection [" + con + "]");
+		}
+		try {
+			con.rollback();
+		}
+		catch (SQLException ex) {
+			throw new TransactionSystemException("Could not roll back JDBC transaction", ex);
+		}
+	}
+    // 设置回滚标志
+	protected void doSetRollbackOnly(DefaultTransactionStatus status) {
+		DataSourceTransactionObject txObject = (DataSourceTransactionObject) status.getTransaction();
+		if (status.isDebug()) {
+			logger.debug("Setting JDBC transaction [" + txObject.getConnectionHolder().getConnection() +
+					"] rollback-only");
+		}
+		txObject.setRollbackOnly();
+	}
+    // 事务完成后清理
+	protected void doCleanupAfterCompletion(Object transaction) {
+		DataSourceTransactionObject txObject = (DataSourceTransactionObject) transaction;
+
+		// 新事务，当前线程解绑数据源dataSource
+		if (txObject.isNewConnectionHolder()) {
+			TransactionSynchronizationManager.unbindResource(this.dataSource);
+		}
+
+		// 释放连接，当前事务完成，则需要将连接释放，如果有线程池，则重置数据库连接，放回线程池
+		Connection con = txObject.getConnectionHolder().getConnection();
+		try {
+			if (txObject.isMustRestoreAutoCommit()) {
+			    // 设置连接自动提交属性
+				con.setAutoCommit(true);
+			}
+			// 事务完成后重置数据库连接
+			DataSourceUtils.resetConnectionAfterTransaction(con, txObject.getPreviousIsolationLevel());
+		}
+		catch (Throwable ex) {
+			logger.debug("Could not reset JDBC Connection after transaction", ex);
+		}
+        // 新事务，释放数据库连接
+		if (txObject.isNewConnectionHolder()) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Releasing JDBC Connection [" + con + "] after transaction");
+			}
+			DataSourceUtils.releaseConnection(con, this.dataSource);
+		}
+
+		txObject.getConnectionHolder().clear();
+	}
+    // 设置事务为只读
+	protected void prepareTransactionalConnection(Connection con, TransactionDefinition definition)
+			throws SQLException {
+        // 是否通过事务连接上的显式语句强制执行事务的只读属性 && 只读事务
+		if (isEnforceReadOnly() && definition.isReadOnly()) {
+			Statement stmt = con.createStatement();
+			try {
+				stmt.executeUpdate("SET TRANSACTION READ ONLY");
+			}
+			finally {
+				stmt.close();
+			}
+		}
+	}
+}
+

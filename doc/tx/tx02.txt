@@ -1,0 +1,325 @@
+spring tx事务源码解析--获取事务属性
+public abstract class AbstractFallbackTransactionAttributeSource implements TransactionAttributeSource {
+    @Override
+	public TransactionAttribute getTransactionAttribute(Method method, Class<?> targetClass) {
+	    // 判断此Method对象表示的方法的类的Class对象
+		if (method.getDeclaringClass() == Object.class) {
+			return null;
+		}
+		// 创建缓存键，从缓存中获取
+		Object cacheKey = getCacheKey(method, targetClass);
+		Object cached = this.attributeCache.get(cacheKey);
+		// 缓存中不存在时
+		if (cached != null) {
+			// 判断是否是默认的事务属性
+			if (cached == NULL_TRANSACTION_ATTRIBUTE) {
+				return null;
+			}
+			else {
+				return (TransactionAttribute) cached;
+			}
+		}
+		else {
+			// 解析目标方法的事务属性
+			TransactionAttribute txAttr = computeTransactionAttribute(method, targetClass);
+			// Put it in the cache.
+			if (txAttr == null) {
+			    // 目标方法未设置事务属性时，则保存默认的
+				this.attributeCache.put(cacheKey, NULL_TRANSACTION_ATTRIBUTE);
+			}
+			else {
+			    // 获取方法的限定名
+				String methodIdentification = ClassUtils.getQualifiedMethodName(method, targetClass);
+				if (txAttr instanceof DefaultTransactionAttribute) {
+				    // 为事务属性设置描述符
+					((DefaultTransactionAttribute) txAttr).setDescriptor(methodIdentification);
+				}
+				if (logger.isDebugEnabled()) {
+					logger.debug("Adding transactional method '" + methodIdentification + "' with attribute: " + txAttr);
+				}
+				this.attributeCache.put(cacheKey, txAttr);
+			}
+			return txAttr;
+		}
+	}
+    protected TransactionAttribute computeTransactionAttribute(Method method, Class<?> targetClass) {
+		// 只允许代理Public修饰的方法 && 当前目标方法不是Public修饰
+		if (allowPublicMethodsOnly() && !Modifier.isPublic(method.getModifiers())) {
+			return null;
+		}
+		// 忽略CGLIB子类，获取用户定义的类
+		Class<?> userClass = ClassUtils.getUserClass(targetClass);
+		// 如果是接口方法，则获取实现类方法
+		Method specificMethod = ClassUtils.getMostSpecificMethod(method, userClass);
+		// 如果是具有泛型参数的方法，继续获取其原始方法
+		specificMethod = BridgeMethodResolver.findBridgedMethod(specificMethod);
+
+		// 解析目标方法上的@Transactional属性
+		TransactionAttribute txAttr = findTransactionAttribute(specificMethod);
+		if (txAttr != null) {
+			return txAttr;
+		}
+		// 目标方法上未设置属性，则在目标类上的事务属性
+		txAttr = findTransactionAttribute(specificMethod.getDeclaringClass());
+		if (txAttr != null && ClassUtils.isUserLevelMethod(method)) {
+			return txAttr;
+		}
+        // 解析获取的方法未设置事务属性，并且解析获取的方法与目标方法不一致，则退回操作
+		if (specificMethod != method) {
+			// 获取原方法的事务属性
+			txAttr = findTransactionAttribute(method);
+			if (txAttr != null) {
+				return txAttr;
+			}
+			// 获取原方法所在类的事务属性
+			txAttr = findTransactionAttribute(method.getDeclaringClass());
+			if (txAttr != null && ClassUtils.isUserLevelMethod(method)) {
+				return txAttr;
+			}
+		}
+		return null;
+	}
+
+}
+public class AnnotationTransactionAttributeSource extends AbstractFallbackTransactionAttributeSource
+		implements Serializable {
+    public AnnotationTransactionAttributeSource(boolean publicMethodsOnly) {
+        // 是否只代理public修饰的方法
+        this.publicMethodsOnly = publicMethodsOnly;
+        this.annotationParsers = new LinkedHashSet<TransactionAnnotationParser>(2);
+        // @Transactional注解解析器
+        this.annotationParsers.add(new SpringTransactionAnnotationParser());
+        if (jta12Present) {
+            this.annotationParsers.add(new JtaTransactionAnnotationParser());
+        }
+        if (ejb3Present) {
+            this.annotationParsers.add(new Ejb3TransactionAnnotationParser());
+        }
+    }
+
+    @Override
+    protected TransactionAttribute findTransactionAttribute(Method method) {
+        return determineTransactionAttribute(method);
+    }
+    protected TransactionAttribute determineTransactionAttribute(AnnotatedElement ae) {
+        if (ae.getAnnotations().length > 0) {
+            // 获取解析器进行@Transactional注解属性解析
+            for (TransactionAnnotationParser annotationParser : this.annotationParsers) {
+                TransactionAttribute attr = annotationParser.parseTransactionAnnotation(ae);
+                if (attr != null) {
+                    return attr;
+                }
+            }
+        }
+        return null;
+    }
+}
+public class SpringTransactionAnnotationParser implements TransactionAnnotationParser, Serializable {
+    @Override
+	public TransactionAttribute parseTransactionAnnotation(AnnotatedElement ae) {
+	    // 获取目标方法上@Transactional注解属性
+		AnnotationAttributes attributes = AnnotatedElementUtils.getMergedAnnotationAttributes(ae, Transactional.class);
+		if (attributes != null) {
+		    // 获取注解值，并且封装为TransactionAttribute返回
+			return parseTransactionAnnotation(attributes);
+		}
+		else {
+			return null;
+		}
+	}
+
+	protected TransactionAttribute parseTransactionAnnotation(AnnotationAttributes attributes) {
+		RuleBasedTransactionAttribute rbta = new RuleBasedTransactionAttribute();
+		// 获取注解上的propagation值
+		Propagation propagation = attributes.getEnum("propagation");
+		rbta.setPropagationBehavior(propagation.value());
+		Isolation isolation = attributes.getEnum("isolation");
+		rbta.setIsolationLevel(isolation.value());
+		rbta.setTimeout(attributes.getNumber("timeout").intValue());
+		rbta.setReadOnly(attributes.getBoolean("readOnly"));
+		rbta.setQualifier(attributes.getString("value"));
+		ArrayList<RollbackRuleAttribute> rollBackRules = new ArrayList<RollbackRuleAttribute>();
+		Class<?>[] rbf = attributes.getClassArray("rollbackFor");
+		for (Class<?> rbRule : rbf) {
+			RollbackRuleAttribute rule = new RollbackRuleAttribute(rbRule);
+			rollBackRules.add(rule);
+		}
+		String[] rbfc = attributes.getStringArray("rollbackForClassName");
+		for (String rbRule : rbfc) {
+			RollbackRuleAttribute rule = new RollbackRuleAttribute(rbRule);
+			rollBackRules.add(rule);
+		}
+		Class<?>[] nrbf = attributes.getClassArray("noRollbackFor");
+		for (Class<?> rbRule : nrbf) {
+			NoRollbackRuleAttribute rule = new NoRollbackRuleAttribute(rbRule);
+			rollBackRules.add(rule);
+		}
+		String[] nrbfc = attributes.getStringArray("noRollbackForClassName");
+		for (String rbRule : nrbfc) {
+			NoRollbackRuleAttribute rule = new NoRollbackRuleAttribute(rbRule);
+			rollBackRules.add(rule);
+		}
+		rbta.getRollbackRules().addAll(rollBackRules);
+		return rbta;
+	}
+}
+-------------------------Transactional注解-------------------------
+@Target({ElementType.METHOD, ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+@Inherited
+@Documented
+public @interface Transactional {
+    // 可选的限定描述符，指定使用的事务管理器
+    @AliasFor("transactionManager")
+    String value() default "";
+
+    // 知道事务管理器bean的名称
+    @AliasFor("value")
+    String transactionManager() default "";
+
+    /**
+     * 该属性用于设置事务的传播行为：
+     * Propagation.REQUIRED：如果有事务, 那么加入事务, 没有的话新建一个(默认情况下)
+     * Propagation.SUPPORTS：如果其他bean调用这个方法,在其他bean中声明事务,那就用事务.如果其他bean没有声明事务,那就不用事务.
+     * Propagation.MANDATORY：必须在一个已有的事务中执行,否则抛出异常
+     * Propagation.REQUIRES_NEW：不管是否存在事务,都创建一个新的事务,原来的挂起,新的执行完毕,继续执行老的事务
+     * Propagation.NOT_SUPPORTED：不支持当前事务，现有同步将被挂起
+     * Propagation.NEVER：必须在一个没有的事务中执行,否则抛出异常(与Propagation.MANDATORY相反)
+     * Propagation.NESTED：如果当前事务存在，则在嵌套事务中执行
+     */
+    Propagation propagation() default Propagation.REQUIRED;
+
+    // 该属性用于设置底层数据库的事务隔离级别，事务隔离级别用于处理多事务并发的情况，通常使用数据库的默认隔离级别即可
+    Isolation isolation() default Isolation.DEFAULT;
+
+    // 该属性用于设置事务的超时秒数，默认值为-1表示永不超时
+    int timeout() default -1;
+
+    // 该属性用于设置当前事务是否为只读事务，设置为true表示只读，false则表示可读写，默认值为false
+    boolean readOnly() default false;
+
+    // 该属性用于设置不需要进行回滚的异常类数组，当方法中抛出指定异常数组中的异常时，不进行事务回滚，可指定多个
+    Class<? extends Throwable>[] rollbackFor() default {};
+
+    // 该属性用于设置需要进行回滚的异常类名称数组，当方法中抛出指定异常名称数组中的异常时，则进行事务回滚，可指定多个
+    String[] rollbackForClassName() default {};
+
+    // 该属性用于设置需要进行回滚的异常类数组，当方法中抛出指定异常数组中的异常时，则进行事务回滚，可指定多个
+    Class<? extends Throwable>[] noRollbackFor() default {};
+
+    // 该属性用于设置不需要进行回滚的异常类名称数组，当方法中抛出指定异常名称数组中的异常时，不进行事务回滚，可指定多个
+    String[] noRollbackForClassName() default {};
+}
+
+-------------------------获取事务管理器-------------------------
+public abstract class TransactionAspectSupport implements BeanFactoryAware, InitializingBean {
+	protected PlatformTransactionManager determineTransactionManager(TransactionAttribute txAttr) {
+		// 如果没有设置tx标签属性值transaction-manager，则返回默认的
+		if (txAttr == null || this.beanFactory == null) {
+			return getTransactionManager();
+		}
+		// 获取与该事务属性关联的限定符值
+		String qualifier = txAttr.getQualifier();
+		if (StringUtils.hasText(qualifier)) {
+		    // 限定符值不为空时根据限定符值去缓存中获取，缓存中不存在，则去IOC容器中获取并存入缓存
+			return determineQualifiedTransactionManager(qualifier);
+		}
+		// 是否设置事务管理器bean的名称
+		else if (StringUtils.hasText(this.transactionManagerBeanName)) {
+		    // 事务管理器bean的名称不为空时根据bean名称去缓存中获取，缓存中不存在，则去IOC容器中获取并存入缓存
+			return determineQualifiedTransactionManager(this.transactionManagerBeanName);
+		}
+		else {
+		    // 获取默认的事务管理器
+			PlatformTransactionManager defaultTransactionManager = getTransactionManager();
+			if (defaultTransactionManager == null) {
+			    // 从事务管理器缓存容器中获取
+				defaultTransactionManager = this.transactionManagerCache.get(DEFAULT_TRANSACTION_MANAGER_KEY);
+				if (defaultTransactionManager == null) {
+				    // 通过IOC容器获取PlatformTransactionManager实例，并存入缓存中
+					defaultTransactionManager = this.beanFactory.getBean(PlatformTransactionManager.class);
+					this.transactionManagerCache.putIfAbsent(
+							DEFAULT_TRANSACTION_MANAGER_KEY, defaultTransactionManager);
+				}
+			}
+			return defaultTransactionManager;
+		}
+	}
+	private PlatformTransactionManager determineQualifiedTransactionManager(String qualifier) {
+	    // 从事务管理器缓存容器中获取
+		PlatformTransactionManager txManager = this.transactionManagerCache.get(qualifier);
+		if (txManager == null) {
+		    // 通过IOC容器获取PlatformTransactionManager实例，并存入缓存中
+			txManager = BeanFactoryAnnotationUtils.qualifiedBeanOfType(
+					this.beanFactory, PlatformTransactionManager.class, qualifier);
+			this.transactionManagerCache.putIfAbsent(qualifier, txManager);
+		}
+		return txManager;
+	}
+
+-------------------------获取目标方法标识-------------------------
+    private String methodIdentification(Method method, Class<?> targetClass, TransactionAttribute txAttr) {
+        // 返回null值，可由子类定制
+        String methodIdentification = methodIdentification(method, targetClass);
+        if (methodIdentification == null) {
+            if (txAttr instanceof DefaultTransactionAttribute) {
+                // 获取事务属性的描述符
+                methodIdentification = ((DefaultTransactionAttribute) txAttr).getDescriptor();
+            }
+            if (methodIdentification == null) {
+                // 获取方法的限定名
+                methodIdentification = ClassUtils.getQualifiedMethodName(method, targetClass);
+            }
+        }
+        return methodIdentification;
+    }
+
+-------------------------创建事务信息-------------------------
+    protected TransactionInfo createTransactionIfNecessary(
+            PlatformTransactionManager tm, TransactionAttribute txAttr, final String joinpointIdentification) {
+        // 如果未指定事务属性名称，则将方法标识应用为事务名称
+        if (txAttr != null && txAttr.getName() == null) {
+            txAttr = new DelegatingTransactionAttribute(txAttr) {
+                @Override
+                public String getName() {
+                    return joinpointIdentification;
+                }
+            };
+        }
+        TransactionStatus status = null;
+        if (txAttr != null) {
+            if (tm != null) {
+                // 事务属性及事务管理器不为null，则获取当前事务的状态，并开启事务
+                status = tm.getTransaction(txAttr);
+            }
+            else {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Skipping transactional joinpoint [" + joinpointIdentification +
+                            "] because no transaction manager has been configured");
+                }
+            }
+        }
+        return prepareTransactionInfo(tm, txAttr, joinpointIdentification, status);
+    }
+    protected TransactionInfo prepareTransactionInfo(PlatformTransactionManager tm,
+            TransactionAttribute txAttr, String joinpointIdentification, TransactionStatus status) {
+        // 初始化TransactionInfo对象，参数：事务管理器/事务属性/事务状态
+        TransactionInfo txInfo = new TransactionInfo(tm, txAttr, joinpointIdentification);
+        if (txAttr != null) {
+            if (logger.isTraceEnabled()) {
+                logger.trace("Getting transaction for [" + txInfo.getJoinpointIdentification() + "]");
+            }
+            // 设置事务状态
+            txInfo.newTransactionStatus(status);
+        }
+        else {
+            if (logger.isTraceEnabled())
+                logger.trace("Don't need to create transaction for [" + joinpointIdentification +
+                        "]: This method isn't transactional.");
+        }
+
+        // 将事务信息绑定当前线程，即存入ThreadLocal中
+        txInfo.bindToThread();
+        return txInfo;
+    }
+}

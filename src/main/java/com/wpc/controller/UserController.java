@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.servlet.ModelAndView;
 
 import java.util.Date;
 
@@ -25,10 +26,12 @@ public class UserController {
     @GetMapping("/{id}")
     @ResponseBody
     @Log(moduleName = "查询用户")
-    public String getUserById(@PathVariable("id") Long id){
-        User user = userService.getUserById(id);
+    public ModelAndView getUserById(@PathVariable("id") Long id, ModelAndView mv){
         System.out.println("通过id查询用户信息");
-        return user.toString();
+        User user = userService.getUserById(id);
+        mv.addObject(user);
+        mv.setViewName("index");
+        return mv;
     }
 
     @GetMapping("/insert")

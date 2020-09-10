@@ -41,7 +41,7 @@ public class TxNamespaceHandler extends NamespaceHandlerSupport {
 		registerBeanDefinitionParser("jta-transaction-manager", new JtaTransactionManagerBeanDefinitionParser());
 	}
 }
-<tx:annotation-driven />标签对应的解析器是：AnnotationDrivenBeanDefinitionParser，并且执行其parse()方法
+<tx:annotation-driven/>标签对应的解析器是：AnnotationDrivenBeanDefinitionParser，并且执行其parse()方法
 class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
 	@Override
 	public BeanDefinition parse(Element element, ParserContext parserContext) {
@@ -49,7 +49,7 @@ class AnnotationDrivenBeanDefinitionParser implements BeanDefinitionParser {
 		registerTransactionalEventListenerFactory(parserContext);
 		// 获取mode属性值
 		String mode = element.getAttribute("mode");
-		// 是否使用 Aspect 方式实现代理，默认方式为JDK的动态代理
+		// 是否使用Aspect方式实现代理，默认方式为JDK的动态代理
 		if ("aspectj".equals(mode)) {
 			// mode="aspectj"
 			registerTransactionAspect(element, parserContext);

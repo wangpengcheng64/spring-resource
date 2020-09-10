@@ -168,7 +168,7 @@ public abstract class AopConfigUtils {
     执行BeanPostProcessor的postProcessAfterInitialization()方法
 
 -------------------------AnnotationAwareAspectJAutoProxyCreator继承关系图-------------------------
-根据Bean时各BeanPostProcessor中方法的执行顺序及AnnotationAwareAspectJAutoProxyCreator继承关系图
+根据创建Bean时各BeanPostProcessor中方法的执行顺序及AnnotationAwareAspectJAutoProxyCreator继承关系图
 定位到AbstractAutoProxyCreator的postProcessBeforeInstantiation()/postProcessAfterInitialization()方法
 public abstract class AbstractAutoProxyCreator extends ProxyProcessorSupport
 		implements SmartInstantiationAwareBeanPostProcessor, BeanFactoryAware {

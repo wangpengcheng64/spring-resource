@@ -29,6 +29,21 @@
         <property name="viewClass" value="org.springframework.web.servlet.view.JstlView"/>
         <property name="prefix" value="/WEB-INF/jsp/"/>
         <property name="suffix" value=".jsp"/>
+        <property name="cache" value="true"/>
+        <property name="viewNames">
+            <value type="java.lang.String">*</value>
+        </property>
+        <property name="contentType" value="text/html;charset=utf-8"/>
+        <property name="attributesMap">
+            <map>
+                <entry key="testAttrMap" value="testAttrMapValue"/>
+            </map>
+        </property>
+        <property name="attributes">
+            <props>
+                <prop key="test">testAttrValue</prop>
+            </props>
+        </property>
     </bean>
 
     <!-- 4.扫描web相关的bean
@@ -45,6 +60,27 @@
                             use-default-filters="true"
                             scope-resolver="org.springframework.context.annotation.AnnotationScopeMetadataResolver" />
                             <!--scoped-proxy="no"/>-->
+
+    <!-- 配置url处理映射，url处理映射的三种方式：
+        1.BeanNameUrlHandlerMapping：通过url名字找到对应的bean的name控制器
+        <bean class="org.springframework.web.servlet.handler.BeanNameUrlHandlerMapping"/>
+        <bean name="/user.do" class="com.wpc.controller.UserController" />
+
+        2.SimpleUrlHandlerMapping：简单的url处理映射]通过key找到bean的id的控制器
+        <bean class="org.springframework.web.servlet.handler.SimpleUrlHandlerMapping">
+            <property name="mappings">
+                <props>
+                    <prop key="/user.do">userController</prop>
+                </props>
+            </property>
+        </bean>
+        <bean id="userController" class="com.wpc.controller.UserController" />
+
+        3.ControllerClassNameHandlerMapping：控制器的类名处理映射-不用配置访问路径,
+        默认的访问路径就是类名,首字母大写变小写,加.do ->userController.do
+        <bean class="org.springframework.web.servlet.mvc.support.ControllerClassNameHandlerMapping"/>
+        <bean class="com.wpc.controller.UserController" />
+    -->
 
     <!-- 启用 aspectj 方式 AOP
     proxy-target-class属性：用来设置JDK动态代理和CGLIB动态代理之间的切换

@@ -1,0 +1,344 @@
+SpringMVC源码解析--视图解析渲染
+public class DispatcherServlet extends FrameworkServlet {
+    private void processDispatchResult(HttpServletRequest request, HttpServletResponse response,
+			HandlerExecutionChain mappedHandler, ModelAndView mv, Exception exception) throws Exception {
+
+		boolean errorView = false;
+
+		if (exception != null) {
+		    // 当前异常属于ModelAndViewDefiningException类型（一个特定的错误页面）
+			if (exception instanceof ModelAndViewDefiningException) {
+				logger.debug("ModelAndViewDefiningException encountered", exception);
+				mv = ((ModelAndViewDefiningException) exception).getModelAndView();
+			}
+			else {
+				Object handler = (mappedHandler != null ? mappedHandler.getHandler() : null);
+			    // 其他异常类型，先获取处理器，然后通过注册的HandlerExceptionResolvers获取ModelAndView
+				mv = processHandlerException(request, response, handler, exception);
+				errorView = (mv != null);
+			}
+		}
+
+		// 处理器是否返回一个要渲染的视图
+		if (mv != null && !mv.wasCleared()) {
+		    // 视图解析渲染
+			render(mv, request, response);
+			if (errorView) {
+				WebUtils.clearErrorRequestAttributes(request);
+			}
+		}
+		else {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Null ModelAndView returned to DispatcherServlet with name '" + getServletName() +
+						"': assuming HandlerAdapter completed request handling");
+			}
+		}
+        // 如果当前开启了异步请求，则直接返回
+		if (WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {
+			// Concurrent handling started during a forward
+			return;
+		}
+        // 遍历执行所有拦截器的afterCompletion方法
+		if (mappedHandler != null) {
+			mappedHandler.triggerAfterCompletion(request, response, null);
+		}
+	}
+	protected void render(ModelAndView mv, HttpServletRequest request, HttpServletResponse response) throws Exception {
+        // 获取请求的语言环境，并将其应用于响应
+        Locale locale = this.localeResolver.resolveLocale(request);
+        response.setLocale(locale);
+
+        View view;
+        // 返回是否使用视图引用
+        if (mv.isReference()) {
+            // TODO 4、根据视图名称进行解析
+            view = resolveViewName(mv.getViewName(), mv.getModelInternal(), locale, request);
+            if (view == null) {
+                throw new ServletException("Could not resolve view with name '" + mv.getViewName() +
+                        "' in servlet with name '" + getServletName() + "'");
+            }
+        }
+        else {
+            // 构建ModelAndView模型时，直接封装的view视图
+            view = mv.getView();
+            if (view == null) {
+                throw new ServletException("ModelAndView [" + mv + "] neither contains a view name nor a " +
+                        "View object in servlet with name '" + getServletName() + "'");
+            }
+        }
+
+        // Delegate to the View object for rendering.
+        if (logger.isDebugEnabled()) {
+            logger.debug("Rendering view [" + view + "] in DispatcherServlet with name '" + getServletName() + "'");
+        }
+        try {
+            if (mv.getStatus() != null) {
+                // 设置response响应状态
+                response.setStatus(mv.getStatus().value());
+            }
+            // TODO 5、进行视图渲染
+            view.render(mv.getModelInternal(), request, response);
+        }
+        catch (Exception ex) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Error rendering view [" + view + "] in DispatcherServlet with name '" +
+                        getServletName() + "'", ex);
+            }
+            throw ex;
+        }
+    }
+    protected View resolveViewName(String viewName, Map<String, Object> model, Locale locale,
+            HttpServletRequest request) throws Exception {
+        // 遍历所有视图解析器，对视图名称进行解析，只要有一个视图解析器能解析出视图就返回 View 对象，否则返回null
+        for (ViewResolver viewResolver : this.viewResolvers) {
+            // spring-web.xml配置的解析器类型为InternalResourceViewResolver，视图类型为JstlView
+            // 调用其父类AbstractCachingViewResolver的resolveViewName()方法
+            View view = viewResolver.resolveViewName(viewName, locale);
+            if (view != null) {
+                return view;
+            }
+        }
+        return null;
+    }
+}
+// 创建视图
+public abstract class AbstractCachingViewResolver extends WebApplicationObjectSupport implements ViewResolver {
+	@Override
+	public View resolveViewName(String viewName, Locale locale) throws Exception {
+	    // 是否需要缓存，在xml文件中可配置
+		if (!isCache()) {
+		    // 创建视图
+			return createView(viewName, locale);
+		}
+		else {
+		    // 获取缓存key，并从缓存中查询，若缓存中存在则直接返回，不存在则创建视图，存入缓存并返回
+			Object cacheKey = getCacheKey(viewName, locale);
+			View view = this.viewAccessCache.get(cacheKey);
+			if (view == null) {
+				synchronized (this.viewCreationCache) {
+					view = this.viewCreationCache.get(cacheKey);
+					if (view == null) {
+						// 请求子类创建视图对象
+						view = createView(viewName, locale);
+						if (view == null && this.cacheUnresolved) {
+							view = UNRESOLVED_VIEW;
+						}
+						if (view != null) {
+							this.viewAccessCache.put(cacheKey, view);
+							this.viewCreationCache.put(cacheKey, view);
+							if (logger.isTraceEnabled()) {
+								logger.trace("Cached view [" + cacheKey + "]");
+							}
+						}
+					}
+				}
+			}
+			return (view != UNRESOLVED_VIEW ? view : null);
+		}
+	}
+}
+public class UrlBasedViewResolver extends AbstractCachingViewResolver implements Ordered {
+    // 指定重定向URL的特殊视图名称的前缀
+    public static final String REDIRECT_URL_PREFIX = "redirect:";
+    // 用于指定转发URL(通常)的特殊视图名称的前缀
+    public static final String FORWARD_URL_PREFIX = "forward:";
+    // 指定视图View类型
+    private Class<?> viewClass;
+    // 视图名称前缀
+    private String prefix = "";
+    // 视图名称后缀
+    private String suffix = "";
+    // 指定请求contentType类型
+    private String contentType;
+    // 重定向时是否使用相对路径
+    private boolean redirectContextRelative = true;
+    // 重定向是否与HTTP1.0客户端兼容
+    private boolean redirectHttp10Compatible = true;
+    // 指定重定向主机列表
+    private String[] redirectHosts;
+    // 指定RequestContext属性
+    private String requestContextAttribute;
+    // 静态属性的映射，在页面中可以访问
+    private final Map<String, Object> staticAttributes = new HashMap<String, Object>();
+    // 是否暴露路径
+    private Boolean exposePathVariables;
+    // 暴露spring容器的Bean，使其可以被当做属性进行访问
+    private Boolean exposeContextBeansAsAttributes;
+    // 暴露上下文中应该公开的bean的名称
+    private String[] exposedContextBeanNames;
+    // 指定视图解析器的解析规则
+    private String[] viewNames;
+	protected View createView(String viewName, Locale locale) throws Exception {
+		// 该视图名称是否符合视图解析器的解析规则，viewNames参数表示支持解析的视图名称列表
+		if (!canHandle(viewName, locale)) {
+			return null;
+		}
+		// 视图名称是否以"redirect:"开头，重定向操作，返回RedirectView类型
+		if (viewName.startsWith(REDIRECT_URL_PREFIX)) {
+			String redirectUrl = viewName.substring(REDIRECT_URL_PREFIX.length());
+			// 参数：重定向地址，重定向时是否使用绝对路径，重定向是否与HTTP1.0客户端兼容
+			RedirectView view = new RedirectView(redirectUrl, isRedirectContextRelative(), isRedirectHttp10Compatible());
+			view.setHosts(getRedirectHosts());
+			return applyLifecycleMethods(viewName, view);
+		}
+		// 视图名称是否以"forward:"开头，请求转发操作，返回InternalResourceView类型
+		if (viewName.startsWith(FORWARD_URL_PREFIX)) {
+			String forwardUrl = viewName.substring(FORWARD_URL_PREFIX.length());
+			return new InternalResourceView(forwardUrl);
+		}
+		// 调用父类实现
+		return super.createView(viewName, locale);
+	}
+    protected View loadView(String viewName, Locale locale) throws Exception {
+        // 通过xml文件中的配置的View类型及属性创建视图对象
+        AbstractUrlBasedView view = buildView(viewName);
+        // 应用Bean生命周期方法，即执行Bean的初始化方法：AbstractAutowireCapableBeanFactory.initializeBean()
+        View result = applyLifecycleMethods(viewName, view);
+        return (view.checkResource(locale) ? result : null);
+    }
+    protected AbstractUrlBasedView buildView(String viewName) throws Exception {
+        // 创建视图对象
+        AbstractUrlBasedView view = (AbstractUrlBasedView) BeanUtils.instantiateClass(getViewClass());
+        // 配置属性的初始化
+        view.setUrl(getPrefix() + viewName + getSuffix());
+
+        String contentType = getContentType();
+        if (contentType != null) {
+            view.setContentType(contentType);
+        }
+
+        view.setRequestContextAttribute(getRequestContextAttribute());
+        view.setAttributesMap(getAttributesMap());
+
+        Boolean exposePathVariables = getExposePathVariables();
+        if (exposePathVariables != null) {
+            view.setExposePathVariables(exposePathVariables);
+        }
+        Boolean exposeContextBeansAsAttributes = getExposeContextBeansAsAttributes();
+        if (exposeContextBeansAsAttributes != null) {
+            view.setExposeContextBeansAsAttributes(exposeContextBeansAsAttributes);
+        }
+        String[] exposedContextBeanNames = getExposedContextBeanNames();
+        if (exposedContextBeanNames != null) {
+            view.setExposedContextBeanNames(exposedContextBeanNames);
+        }
+
+        return view;
+    }
+}
+// 视图渲染
+public abstract class AbstractView extends WebApplicationObjectSupport implements View, BeanNameAware {
+	@Override
+	public void render(Map<String, ?> model, HttpServletRequest request, HttpServletResponse response) throws Exception {
+		if (logger.isTraceEnabled()) {
+			logger.trace("Rendering view with name '" + this.beanName + "' with model " + model +
+				" and static attributes " + this.staticAttributes);
+		}
+        // 创建包含动态值和静态属性的组合输出映射，动态值优先于静态属性
+		Map<String, Object> mergedModel = createMergedOutputModel(model, request, response);
+		// 是否是文件下载，设置响应头
+		prepareResponse(request, response);
+		// 真实处理逻辑，子类实现
+		renderMergedOutputModel(mergedModel, getRequestToExpose(request), response);
+	}
+    protected Map<String, Object> createMergedOutputModel(Map<String, ?> model, HttpServletRequest request,
+            HttpServletResponse response) {
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> pathVars = (this.exposePathVariables ?
+                (Map<String, Object>) request.getAttribute(View.PATH_VARIABLES) : null);
+
+        // 合并静态和动态模型属性，计算容器初始化容量
+        int size = this.staticAttributes.size();
+        size += (model != null ? model.size() : 0);
+        size += (pathVars != null ? pathVars.size() : 0);
+
+        Map<String, Object> mergedModel = new LinkedHashMap<String, Object>(size);
+        // merge的顺序，staticAttributes-->pathVars-->model，pathVars会覆盖同名的staticAttribute
+        mergedModel.putAll(this.staticAttributes);
+        if (pathVars != null) {
+            mergedModel.putAll(pathVars);
+        }
+        if (model != null) {
+            mergedModel.putAll(model);
+        }
+
+        // 是否需要暴露RequestContext属性
+        if (this.requestContextAttribute != null) {
+            mergedModel.put(this.requestContextAttribute, createRequestContext(request, response, mergedModel));
+        }
+
+        return mergedModel;
+    }
+    protected void prepareResponse(HttpServletRequest request, HttpServletResponse response) {
+        // 如果是文件下载，设置响应头
+        if (generatesDownloadContent()) {
+            response.setHeader("Pragma", "private");
+            response.setHeader("Cache-Control", "private, must-revalidate");
+        }
+    }
+}
+public class InternalResourceView extends AbstractUrlBasedView {
+    @Override
+	protected void renderMergedOutputModel(
+			Map<String, Object> model, HttpServletRequest request, HttpServletResponse response) throws Exception {
+
+		// 将Model模型数据映射到request对象的attributes属性中
+		exposeModelAsRequestAttributes(model, request);
+
+		// 由子类实现
+		exposeHelpers(request);
+
+		// 确定请求分派器的路径
+		String dispatcherPath = prepareForRendering(request, response);
+
+		// 获取目标资源(通常是一个JSP)的RequestDispatcher
+		RequestDispatcher rd = getRequestDispatcher(request, dispatcherPath);
+		if (rd == null) {
+			throw new ServletException("Could not get RequestDispatcher for [" + getUrl() +
+					"]: Check that the corresponding file exists within your web application archive!");
+		}
+        // include请求包含是指将另一个Servlet的请求处理流程包含进来，forward请求转发是指将请求转发给别的Servlet处理
+		// If already included or response already committed, perform include, else forward.
+		if (useInclude(request, response)) {
+		    // 指定请求contentType类型
+			response.setContentType(getContentType());
+			if (logger.isDebugEnabled()) {
+				logger.debug("Including resource [" + getUrl() + "] in InternalResourceView '" + getBeanName() + "'");
+			}
+			rd.include(request, response);
+		}
+
+		else {
+		    // 转发由本身指定请求contentType类型
+			if (logger.isDebugEnabled()) {
+				logger.debug("Forwarding to resource [" + getUrl() + "] in InternalResourceView '" + getBeanName() + "'");
+			}
+			rd.forward(request, response);
+		}
+	}
+}
+public abstract class AbstractView extends WebApplicationObjectSupport implements View, BeanNameAware {
+	protected void exposeModelAsRequestAttributes(Map<String, Object> model, HttpServletRequest request) throws Exception {
+		for (Map.Entry<String, Object> entry : model.entrySet()) {
+			String modelName = entry.getKey();
+			Object modelValue = entry.getValue();
+			// 将mergedModel里的全部属性作为request的attribute暴露到request范围里
+			if (modelValue != null) {
+				request.setAttribute(modelName, modelValue);
+				if (logger.isDebugEnabled()) {
+					logger.debug("Added model object '" + modelName + "' of type [" + modelValue.getClass().getName() +
+							"] to request in view with name '" + getBeanName() + "'");
+				}
+			}
+			else {
+			    // 移除属性值为空的
+				request.removeAttribute(modelName);
+				if (logger.isDebugEnabled()) {
+					logger.debug("Removed model object '" + modelName +
+							"' from request in view with name '" + getBeanName() + "'");
+				}
+			}
+		}
+	}
+}

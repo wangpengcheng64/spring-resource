@@ -3,14 +3,19 @@
          xmlns="http://java.sun.com/xml/ns/javaee"
          xsi:schemaLocation="http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_3_0.xsd"
          version="3.0">
-    <!-- Spring监听器 -->
+    <!-- 配置Spring核心监听器，默认会以 /WEB-INF/applicationContext.xml作为配置文件 -->
     <listener>
         <listener-class>org.springframework.web.context.ContextLoaderListener</listener-class>
     </listener>
 
+    <!-- contextConfigLocation参数用来指定Spring的配置文件 -->
     <context-param>
         <param-name>contextConfigLocation</param-name>
         <param-value>classpath:/spring/spring-service.xml</param-value>
+    </context-param>
+    <context-param>
+        <param-name>contextInitializerClasses</param-name>
+        <param-value>com.wpc.config.initializer.MyApplicationContextInitializer,com.wpc.config.initializer.MyApplicationContextInitializer2</param-value>
     </context-param>
 
     <!--配置Druid映射，要放在最前面-->

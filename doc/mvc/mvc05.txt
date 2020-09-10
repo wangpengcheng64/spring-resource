@@ -1,0 +1,300 @@
+SpringMVC源码解析--处理请求返回结果
+HttpServlet.doGet() -> FrameworkServlet.doGet() -> FrameworkServlet.processRequest() -> DispatcherServlet.doService()
+
+public class DispatcherServlet extends FrameworkServlet {
+	protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+	    ......
+        // TODO 3、遍历执行HandlerAdapter处理请求，并且返回一个ModelAndView
+        mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+        ......
+    }
+}
+// 生成ModelAndView
+public abstract class AbstractHandlerMethodAdapter extends WebContentGenerator implements HandlerAdapter, Ordered {
+	@Override
+	public final ModelAndView handle(HttpServletRequest request, HttpServletResponse response, Object handler)
+			throws Exception {
+
+		return handleInternal(request, response, (HandlerMethod) handler);
+	}
+}
+public class RequestMappingHandlerAdapter extends AbstractHandlerMethodAdapter
+		implements BeanFactoryAware, InitializingBean {
+    protected ModelAndView handleInternal(HttpServletRequest request,
+			HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
+
+		ModelAndView mav;
+		// 检查request方法是否被支持且session会话是否必须
+		checkRequest(request);
+
+		// 是否进行session同步，默认为否
+		if (this.synchronizeOnSession) {
+			HttpSession session = request.getSession(false);
+			if (session != null) {
+				Object mutex = WebUtils.getSessionMutex(session);
+				// 若session存在，则在同步块中执行invokeHandlerMethod方法
+				synchronized (mutex) {
+					mav = invokeHandlerMethod(request, response, handlerMethod);
+				}
+			}
+			else {
+				// session不存在，直接执行invokeHandlerMethod方法
+				mav = invokeHandlerMethod(request, response, handlerMethod);
+			}
+		}
+		else {
+			// 不同步，直接执行invokeHandlerMethod方法
+			mav = invokeHandlerMethod(request, response, handlerMethod);
+		}
+        // 设置请求头缓存
+		if (!response.containsHeader(HEADER_CACHE_CONTROL)) {
+			if (getSessionAttributesHandler(handlerMethod).hasSessionAttributes()) {
+				applyCacheSeconds(response, this.cacheSecondsForSessionAttributeHandlers);
+			}
+			else {
+				prepareResponse(response);
+			}
+		}
+		return mav;
+	}
+    protected ModelAndView invokeHandlerMethod(HttpServletRequest request,
+			HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
+        // 将请求和响应封装为ServletWebRequest对象
+		ServletWebRequest webRequest = new ServletWebRequest(request, response);
+		try {
+		    // 解析数据绑定@InitBinder注解
+			WebDataBinderFactory binderFactory = getDataBinderFactory(handlerMethod);
+			// 解析@ModelAttribute注解，作用是将指定数据添加到模型对象中供视图页面展示使用
+			ModelFactory modelFactory = getModelFactory(handlerMethod, binderFactory);
+            // 创建处理器，方法的调用和返回值的处理
+			ServletInvocableHandlerMethod invocableMethod = createInvocableHandlerMethod(handlerMethod);
+			// 参数解析器列表、返回值处理器列表，在RequestMappingHandlerAdapter.afterPropertiesSet()方法中初始化的
+			invocableMethod.setHandlerMethodArgumentResolvers(this.argumentResolvers);
+			invocableMethod.setHandlerMethodReturnValueHandlers(this.returnValueHandlers);
+			invocableMethod.setDataBinderFactory(binderFactory);
+			invocableMethod.setParameterNameDiscoverer(this.parameterNameDiscoverer);
+
+            // 创建视图容器, 用于封装视图, 数据模型, 处理状态等信息
+			ModelAndViewContainer mavContainer = new ModelAndViewContainer();
+			mavContainer.addAllAttributes(RequestContextUtils.getInputFlashMap(request));
+			modelFactory.initModel(webRequest, mavContainer, invocableMethod);
+			mavContainer.setIgnoreDefaultModelOnRedirect(this.ignoreDefaultModelOnRedirect);
+            // 用于异步请求处理的方法
+			AsyncWebRequest asyncWebRequest = WebAsyncUtils.createAsyncWebRequest(request, response);
+			asyncWebRequest.setTimeout(this.asyncRequestTimeout);
+            // 用于管理异步请求处理的中央类，主要用作SPI，通常不被应用程序类直接使用
+			WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+			asyncManager.setTaskExecutor(this.taskExecutor);
+			asyncManager.setAsyncWebRequest(asyncWebRequest);
+			asyncManager.registerCallableInterceptors(this.callableInterceptors);
+			asyncManager.registerDeferredResultInterceptors(this.deferredResultInterceptors);
+
+			if (asyncManager.hasConcurrentResult()) {
+				Object result = asyncManager.getConcurrentResult();
+				mavContainer = (ModelAndViewContainer) asyncManager.getConcurrentResultContext()[0];
+				asyncManager.clearConcurrentResult();
+				if (logger.isDebugEnabled()) {
+					logger.debug("Found concurrent result value [" + result + "]");
+				}
+				invocableMethod = invocableMethod.wrapConcurrentResult(result);
+			}
+            // TODO 执行处理器并处理返回值
+			invocableMethod.invokeAndHandle(webRequest, mavContainer);
+			if (asyncManager.isConcurrentHandlingStarted()) {
+				return null;
+			}
+            // 构建ModelAndView返回
+			return getModelAndView(mavContainer, modelFactory, webRequest);
+		}
+		finally {
+		    // 执行所有的请求销毁回调，并更新在请求处理期间被访问的session属性
+			webRequest.requestCompleted();
+		}
+	}
+    private WebDataBinderFactory getDataBinderFactory(HandlerMethod handlerMethod) throws Exception {
+        // 控制器方法所在的类（即Controller）
+        Class<?> handlerType = handlerMethod.getBeanType();
+        // 通过class类型从缓存中获取有@InitBinder注解方法列表
+        Set<Method> methods = this.initBinderCache.get(handlerType);
+        if (methods == null) {
+            // 查找当前类中@InitBinder注解方法列表，并放入缓存中
+            methods = MethodIntrospector.selectMethods(handlerType, INIT_BINDER_METHODS);
+            this.initBinderCache.put(handlerType, methods);
+        }
+        List<InvocableHandlerMethod> initBinderMethods = new ArrayList<InvocableHandlerMethod>();
+        // 遍历所有@ControllerAdvice注解的类，获取作用于全局的@InitBinder注解方法
+        for (Entry<ControllerAdviceBean, Set<Method>> entry : this.initBinderAdviceCache.entrySet()) {
+            // 该@ControllerAdvice注解的类是否能作用于当前类
+            if (entry.getKey().isApplicableToBeanType(handlerType)) {
+                Object bean = entry.getKey().resolveBean();
+                for (Method method : entry.getValue()) {
+                    // 将@InitBinder注解方法封装成InvocableHandlerMethod类型
+                    initBinderMethods.add(createInitBinderMethod(bean, method));
+                }
+            }
+        }
+        // 遍历当前类的@InitBinder注解方法
+        for (Method method : methods) {
+            Object bean = handlerMethod.getBean();
+            initBinderMethods.add(createInitBinderMethod(bean, method));
+        }
+        return createDataBinderFactory(initBinderMethods);
+    }
+	private ModelAndView getModelAndView(ModelAndViewContainer mavContainer,
+            ModelFactory modelFactory, NativeWebRequest webRequest) throws Exception {
+        // 将request中属性更新到model中
+        modelFactory.updateModel(webRequest, mavContainer);
+        // 如果当前请求已经被处理过，则不再处理，直接返回null
+        if (mavContainer.isRequestHandled()) {
+            return null;
+        }
+        // 获取model，创建ModelAndView对象
+        ModelMap model = mavContainer.getModel();
+        ModelAndView mav = new ModelAndView(mavContainer.getViewName(), model, mavContainer.getStatus());
+        // 如果容器中的视图不是视图名引用，则直接赋值给ModelAndView
+        if (!mavContainer.isViewReference()) {
+            mav.setView((View) mavContainer.getView());
+        }
+        // 重定向属性处理
+        if (model instanceof RedirectAttributes) {
+            Map<String, ?> flashAttributes = ((RedirectAttributes) model).getFlashAttributes();
+            HttpServletRequest request = webRequest.getNativeRequest(HttpServletRequest.class);
+            RequestContextUtils.getOutputFlashMap(request).putAll(flashAttributes);
+        }
+        return mav;
+    }
+}
+public abstract class WebContentGenerator extends WebApplicationObjectSupport {
+	protected final void checkRequest(HttpServletRequest request) throws ServletException {
+		// 检查是否应该支持request方法
+		String method = request.getMethod();
+		// 支持列表 || 当前请求方法不在支持列表
+		if (this.supportedMethods != null && !this.supportedMethods.contains(method)) {
+			throw new HttpRequestMethodNotSupportedException(method, this.supportedMethods);
+		}
+
+		// 需要Session会话处理请求 || 当前请求未找到Session会话
+		if (this.requireSession && request.getSession(false) == null) {
+			throw new HttpSessionRequiredException("Pre-existing session required but none found");
+		}
+	}
+}
+----------------------------------------------参数解析、返回值处理-------------------------------------------------
+public class ServletInvocableHandlerMethod extends InvocableHandlerMethod {
+    public void invokeAndHandle(ServletWebRequest webRequest, ModelAndViewContainer mavContainer,
+			Object... providedArgs) throws Exception {
+        // 执行调用方法获取处理器方法的返回值
+		Object returnValue = invokeForRequest(webRequest, mavContainer, providedArgs);
+		// 设置响应状态
+		setResponseStatus(webRequest);
+        // 返回值为空
+		if (returnValue == null) {
+		    // 请求未修改 || 响应状态不为空 || 请求已经被处理程序完全处理了
+			if (isRequestNotModified(webRequest) || getResponseStatus() != null || mavContainer.isRequestHandled()) {
+			    // 设置请求已被处理，直接返回
+				mavContainer.setRequestHandled(true);
+				return;
+			}
+		}
+		// 响应状态原因有内容
+		else if (StringUtils.hasText(getResponseStatusReason())) {
+			mavContainer.setRequestHandled(true);
+			return;
+		}
+        // 设置请求未被处理
+		mavContainer.setRequestHandled(false);
+		try {
+		    // 调用处理器处理返回值
+			this.returnValueHandlers.handleReturnValue(
+					returnValue, getReturnValueType(returnValue), mavContainer, webRequest);
+		}
+		catch (Exception ex) {
+			if (logger.isTraceEnabled()) {
+				logger.trace(getReturnValueHandlingErrorMessage("Error handling return value", returnValue), ex);
+			}
+			throw ex;
+		}
+	}
+}
+public class InvocableHandlerMethod extends HandlerMethod {
+    public Object invokeForRequest(NativeWebRequest request, ModelAndViewContainer mavContainer,
+			Object... providedArgs) throws Exception {
+        // 获取当前请求的方法参数值
+		Object[] args = getMethodArgumentValues(request, mavContainer, providedArgs);
+		if (logger.isTraceEnabled()) {
+			logger.trace("Invoking '" + ClassUtils.getQualifiedMethodName(getMethod(), getBeanType()) +
+					"' with arguments " + Arrays.toString(args));
+		}
+		// 传入参数，通过反射执行处理器Controller中的方法，获取返回值
+		Object returnValue = doInvoke(args);
+		if (logger.isTraceEnabled()) {
+			logger.trace("Method [" + ClassUtils.getQualifiedMethodName(getMethod(), getBeanType()) +
+					"] returned [" + returnValue + "]");
+		}
+		return returnValue;
+	}
+	private Object[] getMethodArgumentValues(NativeWebRequest request, ModelAndViewContainer mavContainer,
+			Object... providedArgs) throws Exception {
+        // 获取参数列表
+		MethodParameter[] parameters = getMethodParameters();
+		Object[] args = new Object[parameters.length];
+		for (int i = 0; i < parameters.length; i++) {
+			MethodParameter parameter = parameters[i];
+			parameter.initParameterNameDiscovery(this.parameterNameDiscoverer);
+			// 尝试从提供的参数值列表中解析方法参数
+			args[i] = resolveProvidedArgument(parameter, providedArgs);
+			if (args[i] != null) {
+				continue;
+			}
+			// 遍历所有的参数解析器进行解析，如果解析成功则将其存入缓存，并返回true表示支持解析
+			if (this.argumentResolvers.supportsParameter(parameter)) {
+				try {
+				    // 执行参数解析器的解析参数逻辑（@InitBinder注解方法生效），获取参数值
+					args[i] = this.argumentResolvers.resolveArgument(
+							parameter, mavContainer, request, this.dataBinderFactory);
+					continue;
+				}
+				catch (Exception ex) {
+					if (logger.isDebugEnabled()) {
+						logger.debug(getArgumentResolutionErrorMessage("Failed to resolve", i), ex);
+					}
+					throw ex;
+				}
+			}
+			if (args[i] == null) {
+				throw new IllegalStateException("Could not resolve method parameter at index " +
+						parameter.getParameterIndex() + " in " + parameter.getMethod().toGenericString() +
+						": " + getArgumentResolutionErrorMessage("No suitable resolver for", i));
+			}
+		}
+		return args;
+	}
+}
+public class HandlerMethodReturnValueHandlerComposite implements AsyncHandlerMethodReturnValueHandler {
+	public void handleReturnValue(Object returnValue, MethodParameter returnType,
+			ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
+        // 获取对应的返回值处理器
+		HandlerMethodReturnValueHandler handler = selectHandler(returnValue, returnType);
+		if (handler == null) {
+			throw new IllegalArgumentException("Unknown return value type: " + returnType.getParameterType().getName());
+		}
+		// 通过处理器对返回值进行处理，最终结果通过MV传递
+		handler.handleReturnValue(returnValue, returnType, mavContainer, webRequest);
+	}
+	private HandlerMethodReturnValueHandler selectHandler(Object value, MethodParameter returnType) {
+	    // 返回值是否需要异步处理
+		boolean isAsyncValue = isAsyncReturnValue(value, returnType);
+		// 遍历所有的返回值处理器
+		for (HandlerMethodReturnValueHandler handler : this.returnValueHandlers) {
+		    // 当前返回值需要异步处理 && 当前处理器不支持异步处理
+			if (isAsyncValue && !(handler instanceof AsyncHandlerMethodReturnValueHandler)) {
+				continue;
+			}
+			// 若当前遍历的返回值处理器支持该返回值类型，则直接返回
+			if (handler.supportsReturnType(returnType)) {
+				return handler;
+			}
+		}
+		return null;
+	}
+}

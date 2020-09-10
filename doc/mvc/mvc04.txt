@@ -1,0 +1,290 @@
+HttpServlet.doGet() -> FrameworkServlet.doGet() -> FrameworkServlet.processRequest() -> DispatcherServlet.doService()
+
+public class DispatcherServlet extends FrameworkServlet {
+    protected void doService(HttpServletRequest request, HttpServletResponse response) throws Exception {
+		if (logger.isDebugEnabled()) {
+			String resumed = WebAsyncUtils.getAsyncManager(request).hasConcurrentResult() ? " resumed" : "";
+			logger.debug("DispatcherServlet with name '" + getServletName() + "'" + resumed +
+					" processing " + request.getMethod() + " request for [" + getRequestUri(request) + "]");
+		}
+
+		// Keep a snapshot of the request attributes in case of an include,
+		// to be able to restore the original attributes after the include.
+		Map<String, Object> attributesSnapshot = null;
+		// 根据javax.servlet.include.request_uri属性判断请求是否Include请求包含
+		if (WebUtils.isIncludeRequest(request)) {
+		    // 创建属性快照
+			attributesSnapshot = new HashMap<String, Object>();
+			Enumeration<?> attrNames = request.getAttributeNames();
+			while (attrNames.hasMoreElements()) {
+				String attrName = (String) attrNames.nextElement();
+				// 前缀为org.springframework.web.servlet（DispatcherServlet的默认策略属性开始使用的公共前缀）
+				if (this.cleanupAfterInclude || attrName.startsWith(DEFAULT_STRATEGIES_PREFIX)) {
+					attributesSnapshot.put(attrName, request.getAttribute(attrName));
+				}
+			}
+		}
+
+		// 设置一些request属性
+		request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());
+		request.setAttribute(LOCALE_RESOLVER_ATTRIBUTE, this.localeResolver);
+		request.setAttribute(THEME_RESOLVER_ATTRIBUTE, this.themeResolver);
+		request.setAttribute(THEME_SOURCE_ATTRIBUTE, getThemeSource());
+
+		FlashMap inputFlashMap = this.flashMapManager.retrieveAndUpdate(request, response);
+		if (inputFlashMap != null) {
+			request.setAttribute(INPUT_FLASH_MAP_ATTRIBUTE, Collections.unmodifiableMap(inputFlashMap));
+		}
+		request.setAttribute(OUTPUT_FLASH_MAP_ATTRIBUTE, new FlashMap());
+		request.setAttribute(FLASH_MAP_MANAGER_ATTRIBUTE, this.flashMapManager);
+
+		try {
+		    // TODO 1、接收请求，调用doDispatch()方法进行请求分发处理
+			doDispatch(request, response);
+		}
+		finally {
+			if (!WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {
+				// 恢复原始属性快照
+				if (attributesSnapshot != null) {
+					restoreAttributesAfterInclude(request, attributesSnapshot);
+				}
+			}
+		}
+	}
+	protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+        HttpServletRequest processedRequest = request;
+        HandlerExecutionChain mappedHandler = null;
+        boolean multipartRequestParsed = false;
+        // 从request对象中获取WebAsyncManager（用于管理异步请求处理的中央类）,若为null则创建新的并设置到request属性中
+        WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+
+        try {
+            ModelAndView mv = null;
+            Exception dispatchException = null;
+
+            try {
+                // 检查是否有文件上传，即判断content-type是否为multipart/form-data
+                // 如果有则将请求包转换为MultipartHttpServletRequest请求
+                processedRequest = checkMultipart(request);
+                multipartRequestParsed = (processedRequest != request);
+
+                // TODO 2、遍历所有HandlerMapping，通过URL查找指定的Handler(Controller)
+                // Handler与HandlerInterceptor封装成执行链HandlerExecutionChain
+                mappedHandler = getHandler(processedRequest);
+                if (mappedHandler == null || mappedHandler.getHandler() == null) {
+                    // 没有找到处理器映射器，设置适当的HTTP响应状态
+                    noHandlerFound(processedRequest, response);
+                    return;
+                }
+
+                // 遍历所有的HandlerAdapter，查找支持当前处理器映射器类型的适配器
+                HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+
+                // Process last-modified header, if supported by the handler.
+                String method = request.getMethod();
+                boolean isGet = "GET".equals(method);
+                if (isGet || "HEAD".equals(method)) {
+                    long lastModified = ha.getLastModified(request, mappedHandler.getHandler());
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Last-Modified value for [" + getRequestUri(request) + "] is: " + lastModified);
+                    }
+                    // 检查所请求的资源是否已被修改 && 当前为GET请求
+                    if (new ServletWebRequest(request, response).checkNotModified(lastModified) && isGet) {
+                        return;
+                    }
+                }
+                // 遍历执行所有拦截器的preHandle方法，若返回false则调用当前拦截器的afterCompletion方法，并且直接返回
+                if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+                    return;
+                }
+
+                // TODO 3、遍历执行HandlerAdapter处理请求，并且返回一个ModelAndView
+                mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+                // 当前是否开启异步请求
+                if (asyncManager.isConcurrentHandlingStarted()) {
+                    return;
+                }
+                // 转换视图名称，添加前后缀
+                applyDefaultViewName(processedRequest, mv);
+                // 遍历执行所有拦截器的postHandle方法
+                mappedHandler.applyPostHandle(processedRequest, response, mv);
+            }
+            catch (Exception ex) {
+                dispatchException = ex;
+            }
+            catch (Throwable err) {
+                // As of 4.3, we're processing Errors thrown from handler methods as well,
+                // making them available for @ExceptionHandler methods and other scenarios.
+                dispatchException = new NestedServletException("Handler dispatch failed", err);
+            }
+            // 处理最终结果，包括异常处理、渲染页面和发出完成通知触发拦截器的afterCompletion()方法执行等
+            processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+        }
+        catch (Exception ex) {
+            // 出现异常，遍历执行所有拦截器的afterCompletion方法
+            triggerAfterCompletion(processedRequest, response, mappedHandler, ex);
+        }
+        catch (Throwable err) {
+            triggerAfterCompletion(processedRequest, response, mappedHandler,
+                    new NestedServletException("Handler processing failed", err));
+        }
+        finally {
+            if (asyncManager.isConcurrentHandlingStarted()) {
+                // 遍历执行所有AsyncHandlerInterceptor的afterConcurrentHandlingStarted方法
+                if (mappedHandler != null) {
+                    mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);
+                }
+            }
+            else {
+                // 清除用于文件上传而生成的任何资源
+                if (multipartRequestParsed) {
+                    cleanupMultipart(processedRequest);
+                }
+            }
+        }
+    }
+	protected HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+	    // 遍历url处理器映射器（BeanNameUrlHandlerMapping、SimpleUrlHandlerMapping、RequestMappingHandlerMapping）
+		for (HandlerMapping hm : this.handlerMappings) {
+			if (logger.isTraceEnabled()) {
+				logger.trace(
+						"Testing handler map [" + hm + "] in DispatcherServlet with name '" + getServletName() + "'");
+			}
+		    // 执行处理器映射器getHandler()方法，获取执行链HandlerExecutionChain
+			HandlerExecutionChain handler = hm.getHandler(request);
+			// 匹配到一个则直接返回，优先级高的先匹配
+			if (handler != null) {
+				return handler;
+			}
+		}
+		return null;
+	}
+}
+public abstract class AbstractHandlerMapping extends WebApplicationObjectSupport implements HandlerMapping, Ordered {
+    @Override
+	public final HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+	    // 获取处理器，有子类实现
+		Object handler = getHandlerInternal(request);
+        // 如果handler为空，则获取默认的
+		if (handler == null) {
+			handler = getDefaultHandler();
+		}
+		// 如果默认的也为空，则直接返回null
+		if (handler == null) {
+			return null;
+		}
+		// 获取的handler为String类型，则将其作为BeanName去IOC容器中获取
+		if (handler instanceof String) {
+			String handlerName = (String) handler;
+			handler = getApplicationContext().getBean(handlerName);
+		}
+        // 获取执行链HandlerExecutionChain
+		HandlerExecutionChain executionChain = getHandlerExecutionChain(handler, request);
+		// 如果是cors（跨越）请求
+		if (CorsUtils.isCorsRequest(request)) {
+			CorsConfiguration globalConfig = this.globalCorsConfigSource.getCorsConfiguration(request);
+			CorsConfiguration handlerConfig = getCorsConfiguration(handler, request);
+			CorsConfiguration config = (globalConfig != null ? globalConfig.combine(handlerConfig) : handlerConfig);
+			executionChain = getCorsHandlerExecutionChain(request, executionChain, config);
+		}
+		return executionChain;
+	}
+	protected HandlerExecutionChain getHandlerExecutionChain(Object handler, HttpServletRequest request) {
+	    // 判断是否需要封装成执行链
+		HandlerExecutionChain chain = (handler instanceof HandlerExecutionChain ?
+				(HandlerExecutionChain) handler : new HandlerExecutionChain(handler));
+        // 通过request获取请求路径（/user/1）
+		String lookupPath = this.urlPathHelper.getLookupPathForRequest(request);
+		// 遍历所有的拦截器，找出能应用于当前url的，并加入执行链中
+		for (HandlerInterceptor interceptor : this.adaptedInterceptors) {
+			if (interceptor instanceof MappedInterceptor) {
+				MappedInterceptor mappedInterceptor = (MappedInterceptor) interceptor;
+				// 判断拦截器是否能应用于当前url
+				if (mappedInterceptor.matches(lookupPath, this.pathMatcher)) {
+					chain.addInterceptor(mappedInterceptor.getInterceptor());
+				}
+			}
+			else {
+				chain.addInterceptor(interceptor);
+			}
+		}
+		return chain;
+	}
+}
+public abstract class AbstractHandlerMethodMapping<T> extends AbstractHandlerMapping implements InitializingBean {
+    @Override
+	protected HandlerMethod getHandlerInternal(HttpServletRequest request) throws Exception {
+	    // 通过request获取请求路径（/user/1）
+		String lookupPath = getUrlPathHelper().getLookupPathForRequest(request);
+		if (logger.isDebugEnabled()) {
+			logger.debug("Looking up handler method for path " + lookupPath);
+		}
+		// 在执行getMappings和getMappingsByUrl时获取读锁
+		this.mappingRegistry.acquireReadLock();
+		try {
+		    // 根据请求路径查找最匹配的HandlerMethod（带有@RequestMapping注解的方法信息）
+			HandlerMethod handlerMethod = lookupHandlerMethod(lookupPath, request);
+			if (logger.isDebugEnabled()) {
+				if (handlerMethod != null) {
+					logger.debug("Returning handler method [" + handlerMethod + "]");
+				}
+				else {
+					logger.debug("Did not find handler method for [" + lookupPath + "]");
+				}
+			}
+			// 实例化处理器handler，并封装成handlerMethod返回
+			return (handlerMethod != null ? handlerMethod.createWithResolvedBean() : null);
+		}
+		finally {
+		    // 释放读锁
+			this.mappingRegistry.releaseReadLock();
+		}
+	}
+    protected HandlerMethod lookupHandlerMethod(String lookupPath, HttpServletRequest request) throws Exception {
+		List<Match> matches = new ArrayList<Match>();
+		// 匹配优先级: 精确匹配 > 最长路径匹配 > 扩展名匹配
+		// 通过url去映射容器中获取（建立url与controller映射关系源码看第三节）
+		List<T> directPathMatches = this.mappingRegistry.getMappingsByUrl(lookupPath);
+		if (directPathMatches != null) {
+		    // 遍历所有已找到的进一步匹配
+			addMatchingMappings(directPathMatches, matches, request);
+		}
+		if (matches.isEmpty()) {
+			// 遍历所有映射关系，进行匹配
+			addMatchingMappings(this.mappingRegistry.getMappings().keySet(), matches, request);
+		}
+
+		if (!matches.isEmpty()) {
+		    // 比较器，用来对匹配的映射进行排序
+			Comparator<Match> comparator = new MatchComparator(getMappingComparator(request));
+			Collections.sort(matches, comparator);
+			if (logger.isTraceEnabled()) {
+				logger.trace("Found " + matches.size() + " matching mapping(s) for [" +
+						lookupPath + "] : " + matches);
+			}
+			// 获取最优匹配
+			Match bestMatch = matches.get(0);
+			if (matches.size() > 1) {
+				if (CorsUtils.isPreFlightRequest(request)) {
+					return PREFLIGHT_AMBIGUOUS_MATCH;
+				}
+				Match secondBestMatch = matches.get(1);
+			    // 如果存在两个最优匹配，则抛出异常
+				if (comparator.compare(bestMatch, secondBestMatch) == 0) {
+					Method m1 = bestMatch.handlerMethod.getMethod();
+					Method m2 = secondBestMatch.handlerMethod.getMethod();
+					throw new IllegalStateException("Ambiguous handler methods mapped for HTTP path '" +
+							request.getRequestURL() + "': {" + m1 + ", " + m2 + "}");
+				}
+			}
+			// 将匹配路径存入request的属性中
+			handleMatch(bestMatch.mapping, lookupPath, request);
+			// 返回匹配url的处理方法
+			return bestMatch.handlerMethod;
+		}
+		else {
+			return handleNoMatch(this.mappingRegistry.getMappings().keySet(), lookupPath, request);
+		}
+	}
+
+}

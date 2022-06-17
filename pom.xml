@@ -18,7 +18,7 @@
         <mysql.version>5.1.37</mysql.version>
         <druid.version>1.1.10</druid.version>
         <jstl.version>1.2</jstl.version>
-        <fastjson.version>1.2.56</fastjson.version>
+        <fastjson.version>1.2.83</fastjson.version>
         <!-- log4j日志文件管理包版本 -->
         <slf4j.version>1.7.7</slf4j.version>
         <log4j.version>1.2.17</log4j.version>
